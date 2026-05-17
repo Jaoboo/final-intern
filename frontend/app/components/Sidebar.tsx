@@ -39,6 +39,7 @@ const menuItems = [
     children: [
       { label: 'Volume table',      href: '/table/volume' },
       { label: 'Defect table',      href: '/table/defect' },
+      { label: 'Report table',      href: '/table/report' },
       { label: 'TSD-Expense table', href: '/table/tsd'    },
     ]
   },

@@ -488,16 +488,43 @@ export default function ReportPage() {
     setIsExporting(true)
     try {
       const pdfDataUrl = await generatePdfBlob()
+
+      // บันทึกแต่ละแถวของ report ไป API
+      for (const row of rows) {
+        const reportData = {
+          mode: row.modeName || '',
+          assumption_detail: row.assumptionDetail || '',
+          action_detail: row.actionDetail || '',
+          date_day: new Date().toISOString().slice(0, 10),
+          pic: row.pic || '',
+          progress: row.progress || 0,
+          status: row.status || 'Pending',
+        }
+
+        const response = await fetch(`${API}/report`, {
+          method: 'POST',
+          headers: authHeaders(),
+          body: JSON.stringify(reportData),
+        })
+
+        if (!response.ok) {
+          throw new Error(`Failed to submit report: ${response.statusText}`)
+        }
+      }
+
+      // บันทึกลง localStorage สำหรับแสดง submitted reports ใน UI
       const record: SubmittedReport = { id: crypto.randomUUID(), date: todayStr, rows: JSON.parse(JSON.stringify(rows)), pdfDataUrl }
       const newSubmitted = [...submitted, record]
       setSubmitted(newSubmitted)
       localStorage.setItem(SUBMITTED_KEY, JSON.stringify(newSubmitted))
+
       const fresh = [newRow()]
       setRows(fresh)
       localStorage.setItem(STORAGE_KEY, JSON.stringify(fresh))
       setShowSubmitModal(false)
     } catch (err) {
       console.error('Submit failed', err)
+      alert('บันทึก report ไม่สำเร็จ: ' + String(err))
     } finally {
       setIsExporting(false)
     }

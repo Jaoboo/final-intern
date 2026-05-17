@@ -90,7 +90,15 @@ def _parse_shift_group(raw: str) -> tuple[str, str]:
     return raw.strip(), ""
 
 def _defect_item_key(no: int) -> str:
+    """
+    คืน defect_item key — ลอง str(no) ก่อน ถ้าไม่ match ให้ caller ลอง variants อื่น
+    """
     return str(no)
+
+def _defect_item_variants(no: int) -> list:
+    """คืน key ที่เป็นไปได้ทั้งหมด: '1', '01', '001', '0001'"""
+    s = str(no)
+    return [s, s.zfill(2), s.zfill(3), s.zfill(4)]
 
 def _name_to_work_number(name: str, counter: int) -> str:
     """
@@ -305,97 +313,191 @@ def load_csv_to_db():
         # ต้อง commit Model ก่อน เพราะ Volume.model_name FK → model.model_name
         if VOLUMEFORM_PATH and db.query(Volume).count() == 0:
             print(f"[csv] loading Volume from {VOLUMEFORM_PATH}")
-            # สร้าง set ของ model_name ที่มีอยู่จริงใน DB
             valid_models = {r.model_name for r in db.query(Model.model_name).all()}
+
+            _DATE_FMTS_V = [
+                "%d-%m-%Y %H:%M:%S", "%Y-%m-%d %H:%M:%S",
+                "%d/%m/%Y %H:%M:%S", "%Y/%m/%d %H:%M:%S",
+                "%d-%m-%Y %H:%M",    "%Y-%m-%d %H:%M",
+            ]
+            def _parse_vol_dt(d_str: str, t_str: str) -> datetime:
+                combined = f"{d_str} {t_str}".strip()
+                for fmt in _DATE_FMTS_V:
+                    try:
+                        return datetime.strptime(combined, fmt)
+                    except ValueError:
+                        pass
+                raise ValueError(f"ไม่รู้จัก date format: {combined!r}")
+
             try:
                 df = pd.read_csv(VOLUMEFORM_PATH)
-                skipped = 0
+                print(f"[csv] Volume CSV columns: {list(df.columns)}")
+                print(f"[csv] Volume CSV rows: {len(df)}")
+                skipped  = 0
+                inserted = 0
                 for _, row in df.iterrows():
-                    model_name = str(row["Model"]).strip()
+                    model_name = str(row.get("Model", row.get("model_name", ""))).strip()
+                    if not model_name or model_name.lower() == "nan":
+                        skipped += 1
+                        continue
                     if model_name not in valid_models:
                         print(f"[csv] Volume skip: model '{model_name}' not in DB")
                         skipped += 1
                         continue
                     try:
-                        shift, group = _parse_shift_group(str(row["Shift"]))
-                        scan_dt = datetime.strptime(
-                            f"{row['Scan date']} {row['Scan time']}", "%d-%m-%Y %H:%M:%S"
+                        shift, group = _parse_shift_group(str(row.get("Shift", "A")))
+                        scan_dt = _parse_vol_dt(
+                            str(row.get("Scan date", "")),
+                            str(row.get("Scan time", "00:00:00")),
                         )
                         db.add(Volume(
                             model_name = model_name,
-                            quantity   = int(row["Quantity"]),
-                            line       = str(row["Line"]).strip(),
-                            prod_date  = str(row["Production date"]).strip(),
+                            quantity   = int(float(str(row.get("Quantity", row.get("qty", 0))))),
+                            line       = str(row.get("Line", row.get("line", ""))).strip(),
+                            prod_date  = str(row.get("Production date", row.get("prod_date", ""))).strip(),
                             shift      = shift,
                             group      = group,
                             scan_date  = scan_dt.date(),
                             scan_time  = scan_dt.time(),
                         ))
+                        db.flush()
+                        inserted += 1
                     except Exception as row_err:
+                        db.rollback()
                         skipped += 1
                         print(f"[csv] Volume row skip: {row_err}")
-                        db.rollback()
                 db.commit()
-                print(f"[csv] Volume loaded ({len(df) - skipped} rows, {skipped} skipped)")
+                print(f"[csv] Volume loaded: {inserted} inserted, {skipped} skipped")
             except Exception as e:
                 db.rollback()
                 print(f"[csv] Volume FAILED: {e}")
+                import traceback; traceback.print_exc()
 
         # ══ 5. Defect history ══════════════════════════════════════════
         # FK: employee.name, model.part_no, defect_mode.defect_item
-        # ทั้งหมดต้อง commit ก่อนแล้ว
         if DEFECTFORM_PATH and db.query(Defect).count() == 0:
             print(f"[csv] loading Defect from {DEFECTFORM_PATH}")
-            valid_employees  = {r.name for r in db.query(Employee.name).all() if r.name}
-            valid_part_nos   = {r.part_no for r in db.query(Model.part_no).all()}
+
+            # ── valid sets ──
+            valid_employees    = {r.name for r in db.query(Employee.name).all() if r.name}
+            # รองรับ employee ที่ name เป็น full_name ด้วย (กรณี import ใหม่)
+            valid_employees   |= {r.full_name for r in db.query(Employee).all() if r.full_name}
+            valid_part_nos     = {r.part_no for r in db.query(Model.part_no).all()}
             valid_defect_items = {r.defect_item for r in db.query(DefectMode.defect_item).all()}
+
+            # ── สร้าง map: name/full_name → employee.name (FK field) ──
+            emp_name_map: dict = {}
+            for emp in db.query(Employee).all():
+                if emp.name:
+                    emp_name_map[emp.name]      = emp.name
+                if emp.full_name:
+                    emp_name_map[emp.full_name] = emp.name or emp.full_name
+
+            # ── date format variants ──
+            _DATE_FMTS = ["%Y-%m-%d %H:%M:%S", "%d-%m-%Y %H:%M:%S",
+                          "%Y/%m/%d %H:%M:%S", "%d/%m/%Y %H:%M:%S"]
+            def _parse_dt(d_str: str, t_str: str) -> datetime:
+                combined = f"{d_str} {t_str}".strip()
+                for fmt in _DATE_FMTS:
+                    try:
+                        return datetime.strptime(combined, fmt)
+                    except ValueError:
+                        pass
+                raise ValueError(f"ไม่รู้จัก date format: {combined!r}")
+
             try:
                 df = pd.read_csv(DEFECTFORM_PATH)
-                skipped = 0
-                for _, row in df.iterrows():
-                    emp_name    = str(row["Name"]).strip()
-                    defect_item = _defect_item_key(int(row["Defect item no."]))
-                    model_qr    = str(row["Side plate QR code"]).strip()
-                    parsed      = parse_model_qr(model_qr)
+                print(f"[csv] Defect CSV columns: {list(df.columns)}")
+                print(f"[csv] Defect CSV rows: {len(df)}")
+                skipped    = 0
+                inserted   = 0
+                fk_missing = {"employee": set(), "part_no": set(), "defect_item": set()}
 
-                    # ตรวจ FK ก่อน insert
-                    fk_errors = []
-                    if emp_name not in valid_employees:
-                        fk_errors.append(f"employee '{emp_name}' not found")
-                    if parsed["part_no"] not in valid_part_nos:
-                        fk_errors.append(f"part_no '{parsed['part_no']}' not found")
-                    if defect_item not in valid_defect_items:
-                        fk_errors.append(f"defect_item '{defect_item}' not found")
-                    if fk_errors:
-                        print(f"[csv] Defect row skip FK: {', '.join(fk_errors)}")
+                for _, row in df.iterrows():
+                    raw_name    = str(row.get("Name", "")).strip()
+                    raw_item_no = row.get("Defect item no.", row.get("Defect Item no.", ""))
+                    model_qr    = str(row.get("Side plate QR code",
+                                     row.get("Side Plate QR code",
+                                     row.get("model_qr", "")))).strip()
+
+                    if not model_qr or model_qr.lower() == "nan":
                         skipped += 1
                         continue
 
+                    parsed = parse_model_qr(model_qr)
+
+                    # ── resolve employee name → FK ──
+                    fk_name = emp_name_map.get(raw_name)
+                    if not fk_name:
+                        fk_missing["employee"].add(raw_name)
+                        skipped += 1
+                        continue
+
+                    # ── resolve defect_item — ลอง multiple formats ──
+                    fk_defect = None
                     try:
-                        shift, group = _parse_shift_group(str(row["Shift"]))
-                        scan_dt = datetime.strptime(
-                            f"{row['Scan date']} {row['Scan time']}", "%Y-%m-%d %H:%M:%S"
+                        item_no = int(float(str(raw_item_no)))
+                        for variant in _defect_item_variants(item_no):
+                            if variant in valid_defect_items:
+                                fk_defect = variant
+                                break
+                    except (ValueError, TypeError):
+                        # ลองใช้ raw string ตรงๆ
+                        raw_s = str(raw_item_no).strip()
+                        if raw_s in valid_defect_items:
+                            fk_defect = raw_s
+
+                    if not fk_defect:
+                        fk_missing["defect_item"].add(str(raw_item_no))
+                        skipped += 1
+                        continue
+
+                    # ── resolve part_no ──
+                    if parsed["part_no"] not in valid_part_nos:
+                        fk_missing["part_no"].add(parsed["part_no"])
+                        skipped += 1
+                        continue
+
+                    # ── insert (แยก session ต่อ row เพื่อ rollback ไม่กระทบ row อื่น) ──
+                    try:
+                        shift, group = _parse_shift_group(str(row.get("Shift", "A")))
+                        scan_dt = _parse_dt(
+                            str(row.get("Scan date", "")),
+                            str(row.get("Scan time", "00:00:00")),
                         )
                         db.add(Defect(
-                            name      = emp_name,
+                            name      = fk_name,
                             part_no   = parsed["part_no"],
                             line      = parsed["line"],
                             model_qr  = model_qr,
-                            defect_qr = defect_item,
+                            defect_qr = fk_defect,
                             shift     = shift,
                             group     = group,
                             scan_date = scan_dt.date(),
                             scan_time = scan_dt.time(),
                         ))
+                        db.flush()   # ← flush ทีละ row ไม่ rollback ทั้งหมด
+                        inserted += 1
                     except Exception as row_err:
+                        db.rollback()   # rollback เฉพาะ row นี้
                         skipped += 1
-                        print(f"[csv] Defect row skip: {row_err}")
-                        db.rollback()
+                        print(f"[csv] Defect row skip (insert error): {row_err}")
+
                 db.commit()
-                print(f"[csv] Defect loaded ({len(df) - skipped} rows, {skipped} skipped)")
+                print(f"[csv] Defect loaded: {inserted} inserted, {skipped} skipped")
+                if fk_missing["employee"]:
+                    print(f"[csv]   employee not found ({len(fk_missing['employee'])}): "
+                          f"{list(fk_missing['employee'])[:5]}")
+                if fk_missing["defect_item"]:
+                    print(f"[csv]   defect_item not found ({len(fk_missing['defect_item'])}): "
+                          f"{list(fk_missing['defect_item'])[:5]}")
+                if fk_missing["part_no"]:
+                    print(f"[csv]   part_no not found ({len(fk_missing['part_no'])}): "
+                          f"{list(fk_missing['part_no'])[:5]}")
             except Exception as e:
                 db.rollback()
                 print(f"[csv] Defect FAILED: {e}")
+                import traceback; traceback.print_exc()
 
     finally:
         db.close()

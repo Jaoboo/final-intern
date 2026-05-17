@@ -15,6 +15,25 @@ interface VolumeFilters {
   line:     string
 }
 
+interface VolumeRow {
+  no: number
+  date_day: string
+  time: string
+  shift_group: string
+  line: string
+  model: string
+  quantity: number
+  part_no: string
+  production_date: string
+  ph_top: string
+  die_list_ph_top: string
+  ph_btm: string
+  die_list_ph_btm: string
+  th_top: string
+  th_btm: string
+  [key: string]: string | number | null | undefined
+}
+
 // ── Helpers ────────────────────────────────────────────────────────
 /** แปลง production date: รองรับทั้ง DDMMYY (6 digits จาก QR) และ YYYY-MM-DD (ISO) */
 const fmtProdDate = (raw: string) => {
@@ -201,7 +220,7 @@ function ConfirmDialog({ rowNo, onCancel, onConfirm, deleting }: {
 
 // ── Main Page ──────────────────────────────────────────────────────
 export default function VolumeTablePage() {
-  const [rows,      setRows]      = useState<Record<string,any>[]>([])
+  const [rows, setRows] = useState<VolumeRow[]>([])
   const [loading,   setLoading]   = useState(false)
   const [error,     setError]     = useState('')
   const [search,    setSearch]    = useState('')
@@ -210,7 +229,7 @@ export default function VolumeTablePage() {
   const [fpOpen,    setFpOpen]    = useState(false)
   const [confirmNo, setConfirmNo] = useState<number|null>(null)
   const [deleting,  setDeleting]  = useState(false)
-  const [todayStr,  setTodayStr]  = useState('')
+  const [todayStr, setTodayStr] = useState(() => getTodayStr())
 
   const [modelOpts, setModelOpts] = useState<string[]>([])
   const [lineOpts,  setLineOpts]  = useState<string[]>([])
@@ -219,8 +238,10 @@ export default function VolumeTablePage() {
     arr.sort((a,b) => a.localeCompare(b, undefined, { numeric:true, sensitivity:'base' }))
 
   useEffect(() => {
-    setTodayStr(getTodayStr())
-    const t = setInterval(() => setTodayStr(getTodayStr()), 60000)
+    const t = setInterval(() => {
+      setTodayStr(getTodayStr())
+    }, 60000)
+
     return () => clearInterval(t)
   }, [])
 
@@ -241,11 +262,20 @@ export default function VolumeTablePage() {
       const r = await fetch(`${API}/records/volume`)
       if (!r.ok) throw new Error(`HTTP ${r.status}`)
       setRows(await r.json())
-    } catch (e: any) { setError('Cannot load data: ' + e.message) }
-    finally { setLoading(false) }
+    } catch (e: unknown) {
+      const message = e instanceof Error ? e.message : 'Unknown error'
+      setError('Cannot load data: ' + message)
+    } finally {
+      setLoading(false)
+    }
   }
 
-  useEffect(() => { fetchData() }, [])
+    useEffect(() => {
+      const load = async () => {
+        await fetchData()
+      }
+      load()
+    }, [])
 
   const handleDelete = async () => {
     if (confirmNo === null) return
@@ -254,8 +284,9 @@ export default function VolumeTablePage() {
       const r = await fetch(`${API}/volume/${confirmNo}`, { method:'DELETE' })
       if (!r.ok) throw new Error(`HTTP ${r.status}`)
       await fetchData()
-    } catch (e: any) {
-      alert('ลบไม่สำเร็จ: ' + e.message)
+    } catch (e: unknown) {
+      const message = e instanceof Error ? e.message : 'Unknown error'
+      alert('ลบไม่สำเร็จ: ' + message)
     } finally {
       setDeleting(false)
       setConfirmNo(null)
@@ -277,7 +308,7 @@ export default function VolumeTablePage() {
   const badgeCount = Object.entries(applied).filter(([k,v]) => v && k !== 'dateType').length
 
   // ── Cell formatter ─────────────────────────────────────────────
-  const formatCell = (colKey: string, value: any): string => {
+  const formatCell = ( colKey: string, value: string | number | null | undefined ): string => {
     if (colKey === 'date_day')        return fmtIsoDate(String(value ?? ''))
     if (colKey === 'production_date') return fmtProdDate(String(value ?? ''))
     return String(value ?? '—')

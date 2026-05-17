@@ -11,7 +11,6 @@ from .database.database import (
 _con:  duckdb.DuckDBPyConnection = None
 _lock: threading.Lock            = threading.Lock()
 
-# path ของ SQLite file (ตัด prefix "sqlite:///")
 _SQLITE_PATH = DATABASE_URL.replace("sqlite:///", "")
 
 
@@ -24,7 +23,7 @@ def get_con() -> duckdb.DuckDBPyConnection:
 
 
 def get_read_con() -> duckdb.DuckDBPyConnection:
-    return get_con().cursor()   # cursor = thread-safe read
+    return get_con().cursor()
 
 
 # ─── Init DuckDB Tables ───────────────────────────────────────────── #
@@ -42,27 +41,39 @@ def init_duckdb():
             scan_time   TIME
         )
     """)
+    # ── defect: เพิ่ม defect_by_process, defect_type และ model info ──
     con.execute("""
         CREATE TABLE IF NOT EXISTS defect (
-            no          INTEGER PRIMARY KEY,
-            name        VARCHAR,
-            part_no     VARCHAR,
-            model_name  VARCHAR,
-            model_qr    VARCHAR,
-            defect_qr   VARCHAR,
-            defect_mode VARCHAR,
-            defect_code VARCHAR,
-            line        VARCHAR,
-            core_no     VARCHAR,
-            prod_date   VARCHAR,
-            prod_time   VARCHAR,
-            work_tag    VARCHAR,
-            shift       VARCHAR,
-            group_      VARCHAR,
-            scan_date   DATE,
-            scan_time   TIME
+            no                INTEGER PRIMARY KEY,
+            name              VARCHAR,
+            part_no           VARCHAR,
+            model_name        VARCHAR,
+            model_qr          VARCHAR,
+            defect_qr         VARCHAR,
+            defect_mode       VARCHAR,
+            defect_code       VARCHAR,
+            defect_by_process VARCHAR,
+            defect_type       VARCHAR,
+            ph_top            VARCHAR,
+            die_list_ph_top   VARCHAR,
+            ph_btm            VARCHAR,
+            die_list_ph_btm   VARCHAR,
+            th_top            VARCHAR,
+            th_btm            VARCHAR,
+            line              VARCHAR,
+            core_no           VARCHAR,
+            prod_date         VARCHAR,
+            prod_time         VARCHAR,
+            work_tag          VARCHAR,
+            shift             VARCHAR,
+            group_            VARCHAR,
+            scan_date         DATE,
+            scan_time         TIME
         )
     """)
+    # ── Migration: เพิ่ม column ที่ขาดใน defect table เก่า ──
+    _migrate_defect_table(con)
+
     con.execute("""
         CREATE TABLE IF NOT EXISTS report (
             no                  INTEGER PRIMARY KEY,
@@ -98,7 +109,6 @@ def init_duckdb():
             defect_type         VARCHAR
         )
     """)
-    # ── แก้: employee table เพิ่ม columns ที่จำเป็นทั้งหมด ──
     con.execute("""
         CREATE TABLE IF NOT EXISTS employee (
             name        VARCHAR PRIMARY KEY,
@@ -110,7 +120,6 @@ def init_duckdb():
             is_active   BOOLEAN
         )
     """)
-    # ── Migration: เพิ่ม columns ที่อาจหายไปใน DB เก่า ──
     _migrate_employee_table(con)
 
     con.execute("""
@@ -130,8 +139,33 @@ def init_duckdb():
     """)
 
 
+def _migrate_defect_table(con):
+    """เพิ่ม column ที่ขาดไปใน defect table เก่า"""
+    existing_cols = {
+        row[0].lower()
+        for row in con.execute("DESCRIBE defect").fetchall()
+    }
+    new_cols = [
+        ("defect_by_process", "VARCHAR"),
+        ("defect_type",       "VARCHAR"),
+        ("ph_top",            "VARCHAR"),
+        ("die_list_ph_top",   "VARCHAR"),
+        ("ph_btm",            "VARCHAR"),
+        ("die_list_ph_btm",   "VARCHAR"),
+        ("th_top",            "VARCHAR"),
+        ("th_btm",            "VARCHAR"),
+    ]
+    for col, dtype in new_cols:
+        if col not in existing_cols:
+            try:
+                con.execute(f"ALTER TABLE defect ADD COLUMN {col} {dtype}")
+                print(f"[cache] migrated defect: added column {col}")
+            except Exception as e:
+                print(f"[cache] migrate defect.{col} skip: {e}")
+
+
 def _migrate_employee_table(con):
-    """เพิ่ม column ที่ขาดไปในตาราง employee เก่า (ถ้ามี)"""
+    """เพิ่ม column ที่ขาดไปใน employee table เก่า"""
     existing_cols = {
         row[0].lower()
         for row in con.execute("DESCRIBE employee").fetchall()
@@ -150,12 +184,11 @@ def _migrate_employee_table(con):
                 con.execute(f"ALTER TABLE employee ADD COLUMN {col} {dtype}")
                 print(f"[cache] migrated employee: added column {col}")
             except Exception as e:
-                print(f"[cache] migrate {col} skip: {e}")
+                print(f"[cache] migrate employee.{col} skip: {e}")
 
 
 # ─── Helpers ──────────────────────────────────────────────────────── #
 def _delete_removed(con, table: str, sqlite_ids: set):
-    """ลบแถวที่ถูกลบจาก SQLite ออกจาก DuckDB"""
     existing = {row[0] for row in con.execute(f"SELECT no FROM {table}").fetchall()}
     to_delete = existing - sqlite_ids
     if to_delete:
@@ -164,10 +197,6 @@ def _delete_removed(con, table: str, sqlite_ids: set):
 
 
 def _attach_sqlite(con) -> bool:
-    """
-    Attach SQLite file เข้า DuckDB ชั่วคราว (ชื่อ 'sq')
-    คืน True ถ้าสำเร็จ
-    """
     try:
         con.execute("DETACH DATABASE IF EXISTS sq")
     except Exception:
@@ -190,7 +219,6 @@ def _detach_sqlite(con):
 # ─── Per-Table Sync ───────────────────────────────────────────────── #
 
 def sync_master():
-    """Master tables (Model, DefectMode, Employee) — ข้อมูลน้อย ใช้ executemany"""
     with _lock:
         db  = SessionLocal()
         con = get_con()
@@ -234,7 +262,7 @@ def sync_master():
                         defect_type       = excluded.defect_type
                 """, dm_rows)
 
-            # ── Employee — แก้: sync ทุก column ──
+            # ── Employee ──
             emp_rows = [
                 (
                     r.name or "",
@@ -246,7 +274,7 @@ def sync_master():
                     r.is_active if r.is_active is not None else True,
                 )
                 for r in db.query(Employee).all()
-                if r.name  # name เป็น FK ของ defect ต้องมีค่า
+                if r.name
             ]
             if emp_rows:
                 con.executemany("""
@@ -268,21 +296,16 @@ def sync_master():
 
 
 def sync_volume():
-    """
-    Volume — ใช้ DuckDB ATTACH SQLite อ่านโดยตรง (เร็วที่สุด)
-    Fallback เป็น executemany ถ้า attach ไม่ได้
-    """
     with _lock:
         con = get_con()
         t0  = _time.perf_counter()
         try:
             if _attach_sqlite(con):
-                # ── Fast path: INSERT ... SELECT ผ่าน attached SQLite ──
                 con.execute("""
                     INSERT INTO volume
                         (no, model_name, quantity, line, shift, group_, scan_date, scan_time)
                     SELECT v.no,
-                           m.model_name,
+                           COALESCE(m.model_name, v.model_name),
                            v.quantity,
                            v.line,
                            v.shift,
@@ -290,7 +313,7 @@ def sync_volume():
                            CAST(v.scan_date AS DATE),
                            CAST(v.scan_time AS TIME)
                     FROM sq.volume v
-                    JOIN sq.model  m ON v.model_name = m.model_name
+                    LEFT JOIN sq.model m ON v.model_name = m.model_name
                     ON CONFLICT (no) DO UPDATE SET
                         model_name = excluded.model_name,
                         quantity   = excluded.quantity,
@@ -306,12 +329,11 @@ def sync_volume():
                 }
                 _detach_sqlite(con)
             else:
-                # ── Fallback: executemany ──
-                db  = SessionLocal()
+                db = SessionLocal()
                 try:
-                    records = db.query(Volume).join(Volume.model).all()
+                    records = db.query(Volume).outerjoin(Volume.model).all()
                     rows = [
-                        (r.no, r.model_name, r.quantity, r.line,
+                        (r.no, r.model_name or "", r.quantity, r.line,
                          r.shift, r.group, r.scan_date, r.scan_time)
                         for r in records
                     ]
@@ -342,35 +364,39 @@ def sync_volume():
 
 def sync_defect():
     """
-    Defect — ข้อมูลเยอะที่สุด ใช้ DuckDB ATTACH + INSERT...SELECT
-    พร้อม parse prod_date/prod_time/line/core_no/work_tag จาก model_qr inline ใน SQL
-    Fallback เป็น executemany
+    Sync defect จาก SQLite → DuckDB
+    JOIN defect_mode และ model เพื่อดึง defect_by_process, defect_type, ph_top ฯลฯ
     """
     with _lock:
         con = get_con()
         t0  = _time.perf_counter()
         try:
             if _attach_sqlite(con):
-                # ── Fast path ──
-                # parse model_qr ด้วย substr ใน SQL (เหมือน parse_model_qr ใน Python)
-                # model_qr: [0:13]=part_no, [13:16]=line, [14:16]=core_no,
-                #            [16:22]=prod_date, [22:28]=prod_time, [28:]=work_tag
                 con.execute("""
                     INSERT INTO defect (
                         no, name, part_no, model_name, model_qr, defect_qr,
-                        defect_mode, defect_code,
+                        defect_mode, defect_code, defect_by_process, defect_type,
+                        ph_top, die_list_ph_top, ph_btm, die_list_ph_btm, th_top, th_btm,
                         line, core_no, prod_date, prod_time, work_tag,
                         shift, group_, scan_date, scan_time
                     )
                     SELECT
                         d.no,
-                        e.name,
+                        COALESCE(e.name, d.name)                        AS name,
                         substr(d.model_qr, 1, 13)                       AS part_no,
                         m.model_name,
                         d.model_qr,
                         d.defect_qr,
                         dm.defect_mode,
                         dm.defect_code,
+                        dm.defect_by_process,
+                        dm.defect_type,
+                        m.ph_top,
+                        m.die_list_ph_top,
+                        m.ph_btm,
+                        m.die_list_ph_btm,
+                        m.th_top,
+                        m.th_btm,
                         substr(d.model_qr, 14, 3)                       AS line,
                         substr(d.model_qr, 15, 2)                       AS core_no,
                         substr(d.model_qr, 17, 6)                       AS prod_date,
@@ -381,26 +407,34 @@ def sync_defect():
                         CAST(d.scan_date AS DATE),
                         CAST(d.scan_time AS TIME)
                     FROM sq.defect d
-                    JOIN sq.employee    e  ON d.name      = e.name
-                    JOIN sq.model       m  ON d.part_no   = m.part_no
-                    JOIN sq.defect_mode dm ON d.defect_qr = dm.defect_item
+                    LEFT JOIN sq.employee    e  ON d.name      = e.name
+                    LEFT JOIN sq.model       m  ON substr(d.model_qr, 1, 13) = m.part_no
+                    LEFT JOIN sq.defect_mode dm ON d.defect_qr = dm.defect_item
                     ON CONFLICT (no) DO UPDATE SET
-                        name        = excluded.name,
-                        part_no     = excluded.part_no,
-                        model_name  = excluded.model_name,
-                        model_qr    = excluded.model_qr,
-                        defect_qr   = excluded.defect_qr,
-                        defect_mode = excluded.defect_mode,
-                        defect_code = excluded.defect_code,
-                        line        = excluded.line,
-                        core_no     = excluded.core_no,
-                        prod_date   = excluded.prod_date,
-                        prod_time   = excluded.prod_time,
-                        work_tag    = excluded.work_tag,
-                        shift       = excluded.shift,
-                        group_      = excluded.group_,
-                        scan_date   = excluded.scan_date,
-                        scan_time   = excluded.scan_time
+                        name              = excluded.name,
+                        part_no           = excluded.part_no,
+                        model_name        = excluded.model_name,
+                        model_qr          = excluded.model_qr,
+                        defect_qr         = excluded.defect_qr,
+                        defect_mode       = excluded.defect_mode,
+                        defect_code       = excluded.defect_code,
+                        defect_by_process = excluded.defect_by_process,
+                        defect_type       = excluded.defect_type,
+                        ph_top            = excluded.ph_top,
+                        die_list_ph_top   = excluded.die_list_ph_top,
+                        ph_btm            = excluded.ph_btm,
+                        die_list_ph_btm   = excluded.die_list_ph_btm,
+                        th_top            = excluded.th_top,
+                        th_btm            = excluded.th_btm,
+                        line              = excluded.line,
+                        core_no           = excluded.core_no,
+                        prod_date         = excluded.prod_date,
+                        prod_time         = excluded.prod_time,
+                        work_tag          = excluded.work_tag,
+                        shift             = excluded.shift,
+                        group_            = excluded.group_,
+                        scan_date         = excluded.scan_date,
+                        scan_time         = excluded.scan_time
                 """)
                 sqlite_ids = {
                     row[0] for row in
@@ -413,47 +447,79 @@ def sync_defect():
                 try:
                     records = (
                         db.query(Defect)
-                        .join(Defect.model)
-                        .join(Defect.defect_mode)
-                        .join(Defect.employee)
+                        .outerjoin(Defect.model)
+                        .outerjoin(Defect.defect_mode)
+                        .outerjoin(Defect.employee)
                         .all()
                     )
                     rows = []
                     for r in records:
-                        p = parse_model_qr(r.model_qr)
+                        p   = parse_model_qr(r.model_qr) if r.model_qr else {}
+                        emp = r.employee
+                        m   = r.model
+                        dm  = r.defect_mode
                         rows.append((
-                            r.no, r.employee.name, r.part_no, r.model.model_name,
-                            r.model_qr, r.defect_qr,
-                            r.defect_mode.defect_mode, r.defect_mode.defect_code,
-                            p["line"], p["core_no"], p["prod_date"],
-                            p["prod_time"], p["work_tag"],
-                            r.shift, r.group, r.scan_date, r.scan_time,
+                            r.no,
+                            (emp.name or emp.full_name or "") if emp else "",
+                            r.part_no or p.get("part_no", ""),
+                            m.model_name if m else "",
+                            r.model_qr,
+                            r.defect_qr,
+                            dm.defect_mode       if dm else "",
+                            dm.defect_code       if dm else "",
+                            dm.defect_by_process if dm else "",
+                            dm.defect_type       if dm else "",
+                            m.ph_top            if m else "",
+                            m.die_list_ph_top   if m else "",
+                            m.ph_btm            if m else "",
+                            m.die_list_ph_btm   if m else "",
+                            m.th_top            if m else "",
+                            m.th_btm            if m else "",
+                            p.get("line", ""),
+                            p.get("core_no", ""),
+                            p.get("prod_date", ""),
+                            p.get("prod_time", ""),
+                            p.get("work_tag", ""),
+                            r.shift,
+                            r.group,
+                            r.scan_date,
+                            r.scan_time,
                         ))
                     if rows:
                         con.executemany("""
                             INSERT INTO defect (
                                 no, name, part_no, model_name, model_qr, defect_qr,
-                                defect_mode, defect_code, line, core_no, prod_date, prod_time,
-                                work_tag, shift, group_, scan_date, scan_time
+                                defect_mode, defect_code, defect_by_process, defect_type,
+                                ph_top, die_list_ph_top, ph_btm, die_list_ph_btm, th_top, th_btm,
+                                line, core_no, prod_date, prod_time, work_tag,
+                                shift, group_, scan_date, scan_time
                             )
-                            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                             ON CONFLICT (no) DO UPDATE SET
-                                name        = excluded.name,
-                                part_no     = excluded.part_no,
-                                model_name  = excluded.model_name,
-                                model_qr    = excluded.model_qr,
-                                defect_qr   = excluded.defect_qr,
-                                defect_mode = excluded.defect_mode,
-                                defect_code = excluded.defect_code,
-                                line        = excluded.line,
-                                core_no     = excluded.core_no,
-                                prod_date   = excluded.prod_date,
-                                prod_time   = excluded.prod_time,
-                                work_tag    = excluded.work_tag,
-                                shift       = excluded.shift,
-                                group_      = excluded.group_,
-                                scan_date   = excluded.scan_date,
-                                scan_time   = excluded.scan_time
+                                name              = excluded.name,
+                                part_no           = excluded.part_no,
+                                model_name        = excluded.model_name,
+                                model_qr          = excluded.model_qr,
+                                defect_qr         = excluded.defect_qr,
+                                defect_mode       = excluded.defect_mode,
+                                defect_code       = excluded.defect_code,
+                                defect_by_process = excluded.defect_by_process,
+                                defect_type       = excluded.defect_type,
+                                ph_top            = excluded.ph_top,
+                                die_list_ph_top   = excluded.die_list_ph_top,
+                                ph_btm            = excluded.ph_btm,
+                                die_list_ph_btm   = excluded.die_list_ph_btm,
+                                th_top            = excluded.th_top,
+                                th_btm            = excluded.th_btm,
+                                line              = excluded.line,
+                                core_no           = excluded.core_no,
+                                prod_date         = excluded.prod_date,
+                                prod_time         = excluded.prod_time,
+                                work_tag          = excluded.work_tag,
+                                shift             = excluded.shift,
+                                group_            = excluded.group_,
+                                scan_date         = excluded.scan_date,
+                                scan_time         = excluded.scan_time
                         """, rows)
                     sqlite_ids = {r.no for r in records}
                 finally:
@@ -467,7 +533,6 @@ def sync_defect():
 
 
 def sync_report():
-    """Report — ใช้ executemany"""
     with _lock:
         db  = SessionLocal()
         con = get_con()
@@ -505,7 +570,6 @@ def sync_report():
 
 
 def sync_tsd_expense():
-    """TSD Expense — ใช้ ATTACH SQLite (fast path) หรือ executemany (fallback)"""
     with _lock:
         con = get_con()
         t0  = _time.perf_counter()
@@ -529,7 +593,7 @@ def sync_tsd_expense():
                         t.quantity,
                         t.unit
                     FROM sq.tsd_expense t
-                    JOIN sq.employee e ON t.name = e.name
+                    LEFT JOIN sq.employee e ON t.name = e.name
                     ON CONFLICT (no) DO UPDATE SET
                         date_day   = excluded.date_day,
                         shift      = excluded.shift,
@@ -550,10 +614,11 @@ def sync_tsd_expense():
             else:
                 db = SessionLocal()
                 try:
-                    records = db.query(TSDExpense).join(TSDExpense.employee).all()
+                    records = db.query(TSDExpense).outerjoin(TSDExpense.employee).all()
                     rows = [
                         (r.no, r.date_day, r.shift, r.group,
-                         r.employee.name, r.employee.department,
+                         (r.employee.name or r.employee.full_name or "") if r.employee else "",
+                         r.employee.department if r.employee else "",
                          r.scrap_code, r.item, r.price, r.quantity, r.unit)
                         for r in records
                     ]
@@ -613,7 +678,7 @@ def query_volume() -> list[dict]:
 
 def query_defect() -> list[dict]:
     cur  = get_read_con()
-    rows = cur.execute("SELECT * FROM defect ORDER BY scan_date, scan_time").fetchall()
+    rows = cur.execute("SELECT * FROM defect ORDER BY scan_date DESC, scan_time DESC").fetchall()
     cols = [d[0] for d in cur.description]
     return [dict(zip(cols, r)) for r in rows]
 
