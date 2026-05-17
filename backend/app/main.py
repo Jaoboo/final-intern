@@ -54,6 +54,7 @@ class ConnectionManager:
 
 ws_manager = ConnectionManager()
 
+
 # ─── Lifespan ─────────────────────────────────────────────────────── #
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -97,7 +98,9 @@ app.add_middleware(
 app.include_router(auth_router.router)
 app.include_router(users_router.router)
 
+
 # ─── WebSocket Endpoint ───────────────────────────────────────────── #
+
 @app.websocket("/ws")
 async def websocket_endpoint(ws: WebSocket):
     """
@@ -167,19 +170,16 @@ def api_opt_models():
 
 @app.get("/options/lines")
 def api_opt_lines():
-    from .cache import get_read_con
-    cur = get_read_con()
-    rows = cur.execute("SELECT DISTINCT line FROM defect WHERE line IS NOT NULL AND line != '' ORDER BY line").fetchall()
-    vals = [r[0] for r in rows]
-    return sorted(vals, key=lambda x: (not x.isdigit(), int(x) if x.isdigit() else x))
+    # line มาจาก defect records จริงๆ ไม่มี master table
+    data = record_defect()
+    return sorted(set(r["line"] for r in data if r.get("line")), 
+                  key=lambda x: (x.isdigit(), int(x) if x.isdigit() else x))
 
 @app.get("/options/corenos")
 def api_opt_corenos():
-    from .cache import get_read_con
-    cur = get_read_con()
-    rows = cur.execute("SELECT DISTINCT core_no FROM defect WHERE core_no IS NOT NULL AND core_no != '' ORDER BY core_no").fetchall()
-    vals = [r[0] for r in rows]
-    return sorted(vals, key=lambda x: (not x.isdigit(), int(x) if x.isdigit() else x))
+    data = record_defect()
+    return sorted(set(r["core_no"] for r in data if r.get("core_no")),
+                  key=lambda x: (x.isdigit(), int(x) if x.isdigit() else x))
 
 @app.get("/master/models")
 def api_master_models():
@@ -192,17 +192,13 @@ def api_master_models():
 
 @app.get("/options/names")
 def api_opt_names():
-    from .cache import get_read_con
-    cur = get_read_con()
-    rows = cur.execute("SELECT DISTINCT name FROM defect WHERE name IS NOT NULL AND name != '' ORDER BY name").fetchall()
-    return [r[0] for r in rows]
+    data = record_defect()
+    return sorted(set(r["name"] for r in data if r.get("name")))
 
 @app.get("/options/defect-modes")
 def api_opt_defect_modes():
-    from .cache import get_read_con
-    cur = get_read_con()
-    rows = cur.execute("SELECT DISTINCT defect_mode FROM defect WHERE defect_mode IS NOT NULL AND defect_mode != '' ORDER BY defect_mode").fetchall()
-    return [r[0] for r in rows]
+    data = record_defect()
+    return sorted(set(r["defect_mode"] for r in data if r.get("defect_mode")))
 
 @app.get("/options/models")
 def api_opt_models_from_defect():
@@ -290,7 +286,9 @@ async def api_form_volume(body: FormVolumeBody, bg: BackgroundTasks):
     await ws_manager.broadcast({"type": "data_updated", "source": "volume_inserted", "date": str(date.today())})
     return result
 
+
 # ─── Volume ───────────────────────────────────────────────────────── #
+
 @app.get("/volume")
 def api_record_volume(
     date_from: Optional[date] = None,
@@ -318,7 +316,9 @@ async def api_del_volume(no: int, bg: BackgroundTasks):
     await ws_manager.broadcast({"type": "data_updated", "source": "volume_deleted", "date": str(date.today())})
     return {"success": True}
 
+
 # ─── Defect ───────────────────────────────────────────────────────── #
+
 @app.get("/defect")
 def api_record_defect(
     date_type:   str           = "scan",
@@ -354,7 +354,9 @@ async def api_del_defect(no: int, bg: BackgroundTasks):
     await ws_manager.broadcast({"type": "data_updated", "source": "defect_deleted", "date": str(date.today())})
     return {"success": True}
 
+
 # ─── Report ───────────────────────────────────────────────────────── #
+
 @app.get("/report")
 def api_record_report(
     date_from: Optional[date] = None,
@@ -379,7 +381,9 @@ def api_del_report(no: int, bg: BackgroundTasks):
     bg.add_task(sync_report)
     return {"success": True}
 
+
 # ─── Analyze ──────────────────────────────────────────────────────── #
+
 @app.get("/analyze/daily-monitoring")
 def api_daily_monitoring(
     defect_mode: Optional[str]  = None,
@@ -399,6 +403,7 @@ def api_daily_monitoring(
 @app.get("/analyze/data-table")
 def api_data_table():
     return get_data_table_summary()
+
 
 @app.get("/analyze/daily-ratio")
 def api_daily_ratio(
@@ -438,6 +443,7 @@ def api_analyze(
         defect_mode=defect_mode, line=line,
     )
 
+
 @app.get("/analyze/breakdown")
 def api_breakdown(
     date_from:   Optional[date] = None,
@@ -455,6 +461,7 @@ def api_breakdown(
         shift=shift, model=model,
         defect_mode=defect_mode, line=line,
     )
+
 
 @app.get("/analyze/daily-trend")
 def api_daily_trend(
@@ -495,60 +502,45 @@ def api_daily_trend_combined(
         date_from=date_from or today,
         date_to=date_to     or today,
     )
+ 
+
+
+# ─── Records (DataTable page) ─────────────────────────────────────── #
 
 @app.get("/records/defect")
 def api_records_defect():
-    """
-    อ่านจาก DuckDB cache (มีข้อมูลจาก CSV + form ครบทั้งหมด)
-    ไม่ผ่าน SQLite join ซึ่งอาจตัดแถวออกถ้า FK ไม่ match
-    """
-    from .cache import get_read_con
-    cur = get_read_con()
-    rows = cur.execute("""
-        SELECT no, name, scan_date, scan_time, shift, group_,
-               model_qr, defect_qr,
-               defect_mode, defect_code, defect_by_process, defect_type,
-               part_no, core_no, model_name,
-               prod_date, prod_time, work_tag, line,
-               ph_top, die_list_ph_top, ph_btm, die_list_ph_btm,
-               th_top, th_btm
-        FROM defect
-        ORDER BY scan_date DESC, scan_time DESC
-    """).fetchall()
-    cols = [d[0] for d in cur.description]
- 
-    result = []
-    for i, row in enumerate(rows, 1):
-        r     = dict(zip(cols, row))
-        shift = r.get("shift") or ""
-        group = r.get("group_") or ""
-        result.append({
-            "no":                i,
-            "name":              r.get("name") or "",
-            "date_day":          str(r.get("scan_date") or ""),
-            "time":              str(r.get("scan_time") or ""),
-            "shift_group":       f"{shift}/{group}" if shift and group else shift,
-            "line":              r.get("line") or "",
-            "model_qr":          r.get("model_qr") or "",
-            "defect_qr":         r.get("defect_qr") or "",
-            "defect_mode":       r.get("defect_mode") or "",
-            "defect_code":       r.get("defect_code") or "",
-            "defect_by_process": r.get("defect_by_process") or "",
-            "defect_type":       r.get("defect_type") or "",
-            "part_no":           r.get("part_no") or "",
-            "core_no":           r.get("core_no") or "",
-            "model":             r.get("model_name") or "",
-            "production_date":   r.get("prod_date") or "",
-            "production_time":   r.get("prod_time") or "",
-            "work_tag":          r.get("work_tag") or "",
-            "ph_top":            r.get("ph_top") or "",
-            "die_list_ph_top":   r.get("die_list_ph_top") or "",
-            "ph_btm":            r.get("ph_btm") or "",
-            "die_list_ph_btm":   r.get("die_list_ph_btm") or "",
-            "th_top":            r.get("th_top") or "",
-            "th_btm":            r.get("th_btm") or "",
-        })
-    return result
+    rows = record_defect()
+    return [
+        {
+            "no":                r["no"],
+            "name":              r["name"],
+            "date_day":          str(r["scan_date"]),
+            "time":              str(r["scan_time"]),
+            "defect_mode":       r["defect_mode"],
+            "defect_code":       r["defect_code"],
+            "defect_by_process": r.get("defect_by_process", ""),
+            "defect_type":       r.get("defect_type", ""),
+            "part_no":           r["part_no"],
+            "core_no":           r["core_no"],
+            "model":             r["model_name"],
+            "production_date":   r["prod_date"],
+            "production_time":   r["prod_time"],
+            "work_tag":          r["work_tag"],
+            "ph_top":            r["ph_top"],
+            "die_list_ph_top":   r["die_list_ph_top"],
+            "ph_btm":            r["ph_btm"],
+            "die_list_ph_btm":   r["die_list_ph_btm"],
+            "th_top":            r["th_top"],
+            "th_btm":            r["th_btm"],
+            "model_qr":          r["model_qr"],
+            "defect_qr":         r["defect_qr"],
+            "shift":             r["shift"],
+            "group":             r.get("group", ""),
+            "shift_group":       r.get("shift_group", r["shift"]),
+            "line":              r["line"],
+        }
+        for r in rows
+    ]
 
 @app.get("/records/volume")
 def api_records_volume():
@@ -593,7 +585,9 @@ def api_records_report():
         for r in rows
     ]
 
+
 # ─── Correction Note ──────────────────────────────────────────────── #
+
 # ── Targets per view type ──────────────────────────────────────────── #
 DEFECT_TARGET_BOTH   = 1.8   # Both (After + Before) combined
 DEFECT_TARGET_AFTER  = 1.0   # After Day only
@@ -746,7 +740,9 @@ def api_correction_history():
     finally:
         db.close()
 
+
 # ─── Debug ────────────────────────────────────────────────────────── #
+
 @app.get("/debug/resync")
 def resync():
     sync_defect()
@@ -818,6 +814,7 @@ def debug_modes():
         db.close()
 
 # ─── TSD Expense ──────────────────────────────────────────────────── #
+
 @app.get("/options/tsd-scrap-codes")
 def api_opt_tsd_scrap_codes():
     db = SessionLocal()
@@ -845,7 +842,7 @@ def api_records_tsd():
         from .database.database import TSDExpense
         records = (
             db.query(TSDExpense)
-            .outerjoin(TSDExpense.employee)
+            .join(TSDExpense.employee)
             .order_by(TSDExpense.date_day, TSDExpense.no)
             .all()
         )
@@ -854,7 +851,7 @@ def api_records_tsd():
                 "no":              i + 1,
                 "date_day":        str(r.date_day),
                 "shift_group":     f"{r.shift}/{r.group}" if r.shift and r.group else (r.shift or ""),
-                "department name": (r.employee.department or "") if r.employee else "",
+                "department name": r.employee.department if r.employee else "",
                 "scrap_code":      r.scrap_code or "",
                 "item":            r.item or "",
                 "price":           r.price or 0,
@@ -964,15 +961,35 @@ def tsd_summary(
         department=department,
     )
 
-@app.get("/debug/sync-status")
-def sync_status():
-    """ตรวจสอบว่า DuckDB cache มีข้อมูลหรือยัง"""
+@app.get("/records/tsd-defect")
+def api_records_tsd_expense():
+    """ดึงข้อมูล TSD Expense ทั้งหมดจาก DuckDB แคช เพื่อส่งไปแสดงบนหน้าเว็บตาราง"""
     from .cache import get_read_con
     cur = get_read_con()
-    defect_count = cur.execute("SELECT COUNT(*) FROM defect").fetchone()[0]
-    volume_count = cur.execute("SELECT COUNT(*) FROM volume").fetchone()[0]
-    return {
-        "defect_rows": defect_count,
-        "volume_rows": volume_count,
-        "ready": defect_count > 0 or volume_count > 0,
-    }
+    
+    rows = cur.execute("""
+        SELECT *
+        FROM tsd_expense
+        ORDER BY date_day DESC
+    """).fetchall()
+    
+    cols = [d[0] for d in cur.description]
+    result = []
+    
+    for i, row in enumerate(rows, 1):
+        r = dict(zip(cols, row))
+        result.append({
+            "no":          i,
+            "db_id":       r.get("no") or i,  # ผูก ID จริงสำหรับการสั่งลบข้อมูล
+            "date_day":    str(r.get("date_day") or ""),
+            "shift_group": f"{r.get('shift') or ''}/{r.get('group_') or ''}".strip("/") or "—",
+            "name":        r.get("name") or "",
+            "department":  r.get("department") or "",
+            "scrap_code":  r.get("scrap_code") or "",
+            "item":        r.get("item") or "",
+            "price":       r.get("price") or 0.0,
+            "quantity":    r.get("quantity") or 0.0,
+            "unit":        r.get("unit") or "",
+            "total":       round((r.get("price") or 0.0) * (r.get("quantity") or 0.0), 2) # คำนวณราคารวม
+        })
+    return result

@@ -48,18 +48,37 @@ interface DefectFilters {
 
 // ── Helpers ────────────────────────────────────────────────────────
 const fmtProdDate = (raw: string) => {
-  if (!raw || raw.length < 6) return raw
-  return `${raw.slice(0,2)}/${raw.slice(2,4)}/20${raw.slice(4,6)}`
+  if (!raw) return raw
+  if (raw.includes('-')) {
+    const parts = raw.split('-')
+    if (parts.length === 3) return `${parts[2]}/${parts[1]}/${parts[0]}`
+  }
+  if (raw.includes('/')) {
+    const parts = raw.split('/')
+    if (parts.length === 3 && parts[0].length === 4) return `${parts[2]}/${parts[1]}/${parts[0]}`
+    return raw
+  }
+  if (raw.length === 6) {
+    return `${raw.slice(0,2)}/${raw.slice(2,4)}/20${raw.slice(4,6)}`
+  }
+  return raw
 }
+
 const fmtIsoDate = (raw: string) => {
   if (!raw) return raw
+  if (raw.includes('T')) raw = raw.split('T')[0]
   const parts = raw.slice(0,10).split('-')
   if (parts.length !== 3) return raw
   return `${parts[2]}/${parts[1]}/${parts[0]}`
 }
+
 const fmtProdTime = (raw: string) => {
-  if (!raw || raw.length < 6) return raw
-  return `${raw.slice(0,2)}:${raw.slice(2,4)}:${raw.slice(4,6)}`
+  if (!raw) return raw
+  if (raw.includes(':')) return raw
+  if (raw.length === 6) {
+    return `${raw.slice(0,2)}:${raw.slice(2,4)}:${raw.slice(4,6)}`
+  }
+  return raw
 }
 
 function emptyFilters(): DefectFilters {
@@ -275,7 +294,6 @@ export default function DefectTablePage() {
   const [fpOpen,     setFpOpen]     = useState(false)
   const [confirmRow, setConfirmRow] = useState<{ displayNo: number; dbId: number } | null>(null)
   const [deleting,   setDeleting]   = useState(false)
-  // ── แก้ set-state-in-effect: ใช้ lazy initializer (ไม่ต้อง effect สำหรับค่าเริ่มต้น) ──
   const [todayStr,   setTodayStr]   = useState<string>(getTodayStr)
 
   const [nameOpts,  setNameOpts]  = useState<string[]>([])
@@ -289,8 +307,6 @@ export default function DefectTablePage() {
   const ns = (arr: string[]) =>
     arr.sort((a,b) => a.localeCompare(b, undefined, { numeric:true, sensitivity:'base' }))
 
-  // ── แก้ set-state-in-effect: ไม่ call setState synchronously ใน body ──
-  // ใช้แค่ interval; ค่าเริ่มต้นมาจาก lazy initializer ข้างบนแล้ว
   useEffect(() => {
     const t = setInterval(() => setTodayStr(getTodayStr()), 60000)
     return () => clearInterval(t)
@@ -333,35 +349,40 @@ export default function DefectTablePage() {
   }
 
   useEffect(() => {
-    const loadData = async () => {
+    let isMounted = true;
+    
+    const loadInitialData = async () => {
       if (fetchingRef.current) return
-
       fetchingRef.current = true
+      
       setLoading(true)
       setError('')
-
+      
       try {
         const r = await fetch(`${API}/records/defect`)
-
-        if (!r.ok) {
-          throw new Error(`HTTP ${r.status}`)
+        if (!r.ok) throw new Error(`HTTP ${r.status}`)
+        const data = await r.json() as DefectRow[]
+        
+        if (isMounted) {
+          setRows(data)
         }
-
-        const data = (await r.json()) as DefectRow[]
-        setRows(data)
-
       } catch (e: unknown) {
-        setError(
-          'Cannot load data: ' +
-          (e instanceof Error ? e.message : String(e))
-        )
+        if (isMounted) {
+          setError('Cannot load data: ' + (e instanceof Error ? e.message : String(e)))
+        }
       } finally {
-        setLoading(false)
+        if (isMounted) {
+          setLoading(false)
+        }
         fetchingRef.current = false
       }
     }
 
-    void loadData()
+    void loadInitialData()
+
+    return () => {
+      isMounted = false
+    }
   }, [])
 
   const handleDelete = async () => {
@@ -387,7 +408,11 @@ export default function DefectTablePage() {
       let dateVal = ''
       if (f.dateType === 'production') {
         const raw = r.production_date
-        if (raw.length >= 6) dateVal = `20${raw.slice(4,6)}-${raw.slice(2,4)}-${raw.slice(0,2)}`
+        if (raw.includes('-')) {
+          dateVal = raw
+        } else if (raw.length >= 6) {
+          dateVal = `20${raw.slice(4,6)}-${raw.slice(2,4)}-${raw.slice(0,2)}`
+        }
       } else {
         dateVal = r.date_day
       }
