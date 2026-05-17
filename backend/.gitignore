@@ -1,0 +1,32 @@
+# Virtual Environment
+.venv/
+venv/
+
+# Environment variables
+.env
+
+# Python cache
+__pycache__/
+*.py[cod]
+
+# Database files
+*.db
+*.duckdb
+
+# VSCode
+.vscode/
+
+# Logs
+*.log
+
+# Pytest
+.pytest_cache/
+
+# Build files
+dist/
+build/
+*.egg-info/
+
+# Coverage
+.coverage
+htmlcov/
