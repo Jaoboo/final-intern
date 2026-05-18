@@ -30,10 +30,6 @@ const COL_MAP: Record<string, string> = {
   'model name':      'model_name',
   'model_name':      'model_name',
   'modelname':       'model_name',
-  'line':            'line',
-  'line no':         'line',
-  'line no.':        'line',
-  'lineno':          'line',
   'quantity':        'quantity',
   'qty':             'quantity',
   'จำนวน':           'quantity',
@@ -52,6 +48,8 @@ const COL_MAP: Record<string, string> = {
   'part no.':        'part_no',
   'part_no':         'part_no',
   'partno':          'part_no',
+  'core part number': 'part_no',
+  'core part number ': 'part_no',
   'core no':         'core_no',
   'core no.':        'core_no',
   'core_no':         'core_no',
@@ -100,12 +98,11 @@ function looksLikeDateSerial(v: number) { const n = Math.floor(v); return n >= 3
 function colIsTime(h: string) { const l = h.toLowerCase(); return ['time','เวลา','tm','hour'].some(k=>l.includes(k)) && !['date','วัน','dt'].some(k=>l.includes(k)) }
 function colIsDate(h: string) { return ['date','วัน','dt'].some(k=>h.toLowerCase().includes(k)) }
 
-function formatCell(header: string, value: unknown): string {
+function formatCellValue(header: string, value: unknown): string {
   if (value instanceof Date) {
     if (isNaN(value.getTime())) return ''
-    const dd=String(value.getDate()).padStart(2,'0'), mm=String(value.getMonth()+1).padStart(2,'0'), yyyy=value.getFullYear()
     if (colIsTime(header)) return `${String(value.getHours()).padStart(2,'0')}:${String(value.getMinutes()).padStart(2,'0')}:${String(value.getSeconds()).padStart(2,'0')}`
-    return `${dd}-${mm}-${yyyy}`
+    return `${String(value.getDate()).padStart(2,'0')}-${String(value.getMonth()+1).padStart(2,'0')}-${value.getFullYear()}`
   }
   if (typeof value === 'number') {
     if (value > 0 && value < 1) return excelSerialToTimeStr(value)
@@ -121,9 +118,8 @@ function formatCell(header: string, value: unknown): string {
     try {
       const d = new Date(value)
       if (!isNaN(d.getTime())) {
-        const dd=String(d.getUTCDate()).padStart(2,'0'), mm=String(d.getUTCMonth()+1).padStart(2,'0'), yyyy=d.getUTCFullYear()
         if (colIsTime(header)) return `${String(d.getUTCHours()).padStart(2,'0')}:${String(d.getUTCMinutes()).padStart(2,'0')}:${String(d.getUTCSeconds()).padStart(2,'0')}`
-        return `${dd}-${mm}-${yyyy}`
+        return `${String(d.getUTCDate()).padStart(2,'0')}-${String(d.getUTCMonth()+1).padStart(2,'0')}-${d.getUTCFullYear()}`
       }
     } catch { /* ignore */ }
   }
@@ -131,74 +127,74 @@ function formatCell(header: string, value: unknown): string {
 }
 
 // ══════════════════════════════════════════════════════
-//  File Parsing — ExcelJS + PapaParse
+//  File Parser — ExcelJS for xlsx/xls, PapaParse for csv
 // ══════════════════════════════════════════════════════
-function cellToRaw(cellValue: ExcelJS.CellValue): unknown {
-  if (cellValue === null || cellValue === undefined) return ''
-  if (cellValue instanceof Date) return cellValue
-  if (typeof cellValue === 'object') {
-    if ('richText' in cellValue) {
-      return (cellValue as ExcelJS.CellRichTextValue).richText.map(r => r.text).join('')
-    }
-    if ('result' in cellValue) {
-      const r = (cellValue as ExcelJS.CellFormulaValue).result
-      return r instanceof Date ? r : r ?? ''
-    }
-    if ('text' in cellValue) {
-      return String((cellValue as ExcelJS.CellHyperlinkValue).text)
-    }
+async function parseFile(file: File): Promise<{
+  rows: Record<string, unknown>[]
+  headers: string[]
+}> {
+  const ext = file.name.split('.').pop()?.toLowerCase()
+
+  if (ext === 'csv') {
+    // ── CSV: PapaParse ──────────────────────────────────────────────
+    return new Promise((resolve, reject) => {
+      Papa.parse<Record<string, unknown>>(file, {
+        header: true,
+        skipEmptyLines: true,
+        dynamicTyping: true,
+        complete: (results) => {
+          const rows = results.data
+          resolve({
+            rows,
+            headers: rows.length > 0 ? Object.keys(rows[0]) : [],
+          })
+        },
+        error: (err) => reject(new Error(err.message)),
+      })
+    })
   }
-  return cellValue
-}
 
-async function parseExcelFile(file: File): Promise<{ rows: Record<string, unknown>[]; headers: string[] }> {
-  const buffer = await file.arrayBuffer()
-  const workbook = new ExcelJS.Workbook()
-  await workbook.xlsx.load(buffer)
+  // ── XLSX / XLS: ExcelJS ────────────────────────────────────────────
+  const buf = await file.arrayBuffer()
+  const wb  = new ExcelJS.Workbook()
 
-  const worksheet = workbook.worksheets[0]
-  if (!worksheet) return { rows: [], headers: [] }
+  if (ext === 'xls') {
+    // ExcelJS ไม่รองรับ .xls โดยตรง — แจ้งผู้ใช้
+    throw new Error('ไฟล์ .xls ไม่รองรับ กรุณาแปลงเป็น .xlsx ก่อน')
+  }
 
-  const headerRow = worksheet.getRow(1)
-  const headers: string[] = []
-  headerRow.eachCell({ includeEmpty: true }, (cell, colNumber) => {
-    headers[colNumber - 1] = String(cellToRaw(cell.value) ?? '').trim()
-  })
+  await wb.xlsx.load(buf)
+  const ws = wb.worksheets[0]
+  if (!ws) throw new Error('ไม่พบ Sheet ในไฟล์')
 
   const rows: Record<string, unknown>[] = []
-  worksheet.eachRow({ includeEmpty: false }, (row, rowNumber) => {
-    if (rowNumber === 1) return
-    const rowData: Record<string, unknown> = {}
-    row.eachCell({ includeEmpty: true }, (cell, colNumber) => {
-      const header = headers[colNumber - 1]
-      if (header) rowData[header] = cellToRaw(cell.value)
+  let headers: string[] = []
+
+  ws.eachRow((row, rowNumber) => {
+    const values = row.values as unknown[] // index 1-based
+    const cells  = Array.from({ length: (values.length as number) - 1 }, (_, i) => {
+      const cell = row.getCell(i + 1)
+      // ดึงค่าจริง: formula → result, date → Date object
+      if (cell.type === ExcelJS.ValueType.Formula) {
+        return cell.result
+      }
+      if (cell.type === ExcelJS.ValueType.Date) {
+        return cell.value
+      }
+      return cell.value
     })
-    const hasData = Object.values(rowData).some(v => v !== '' && v !== null && v !== undefined)
-    if (hasData) rows.push(rowData)
+
+    if (rowNumber === 1) {
+      headers = cells.map(c => String(c ?? '').trim())
+    } else {
+      if (cells.every(c => c === null || c === undefined || c === '')) return
+      const obj: Record<string, unknown> = {}
+      headers.forEach((h, i) => { obj[h] = cells[i] ?? null })
+      rows.push(obj)
+    }
   })
 
-  return { rows, headers: headers.filter(Boolean) }
-}
-
-async function parseCsvFile(file: File): Promise<{ rows: Record<string, unknown>[]; headers: string[] }> {
-  return new Promise((resolve, reject) => {
-    Papa.parse<Record<string, unknown>>(file, {
-      header: true,
-      skipEmptyLines: true,
-      dynamicTyping: true,
-      complete: (results) => {
-        const headers = results.meta.fields ?? []
-        resolve({ rows: results.data, headers })
-      },
-      error: (err) => reject(err),
-    })
-  })
-}
-
-async function parseFile(file: File): Promise<{ rows: Record<string, unknown>[]; headers: string[] }> {
-  const ext = file.name.split('.').pop()?.toLowerCase()
-  if (ext === 'csv') return parseCsvFile(file)
-  return parseExcelFile(file)
+  return { rows, headers }
 }
 
 // ══════════════════════════════════════════════════════
@@ -220,12 +216,6 @@ const IconTrash = () => (
     <path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/>
     <path d="M10 11v6"/><path d="M14 11v6"/>
     <path d="M9 6V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2"/>
-  </svg>
-)
-const IconFileSmall = () => (
-  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
-    <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/>
-    <polyline points="14 2 14 8 20 8"/>
   </svg>
 )
 const IconUser = () => (
@@ -271,99 +261,68 @@ function ToastContainer({ toasts, onDismiss }: { toasts: ToastMsg[]; onDismiss: 
 // ══════════════════════════════════════════════════════
 //  Submit Progress Bar
 // ══════════════════════════════════════════════════════
-function SubmitProgress({ current, total }: { current: number; total: number }) {
-  const pct = total > 0 ? Math.round((current / total) * 100) : 0
+function SubmitProgress({ label }: { label: string }) {
   return (
     <div style={{ position:'fixed', inset:0, background:'rgba(0,0,0,.4)', zIndex:999, display:'flex', alignItems:'center', justifyContent:'center' }}>
       <div style={{ background:'#fff', borderRadius:16, padding:'32px 40px', textAlign:'center', minWidth:300, boxShadow:'0 8px 40px rgba(0,0,0,.15)' }}>
         <div style={{ fontSize:16, fontWeight:700, marginBottom:6, color:'#111827' }}>กำลังบันทึกข้อมูล…</div>
-        <div style={{ fontSize:13, color:'#9ca3af', marginBottom:20 }}>{current} / {total} rows</div>
+        <div style={{ fontSize:13, color:'#9ca3af', marginBottom:20 }}>{label}</div>
         <div style={{ height:8, background:'#f0f0f0', borderRadius:99, overflow:'hidden', marginBottom:10 }}>
-          <div style={{ height:'100%', borderRadius:99, background:'#1462FF', width:`${pct}%`, transition:'width .2s ease' }} />
+          <div style={{
+            height:'100%', borderRadius:99, background:'#1462FF',
+            width:'100%',
+            animation: 'indeterminate 1.4s ease infinite',
+          }} />
         </div>
-        <div style={{ fontSize:12, color:'#6b7280' }}>{pct}%</div>
+        <style>{`
+          @keyframes indeterminate {
+            0%   { transform: translateX(-100%) scaleX(0.4); }
+            50%  { transform: translateX(0%)    scaleX(0.6); }
+            100% { transform: translateX(100%)  scaleX(0.4); }
+          }
+        `}</style>
       </div>
     </div>
   )
-}
-
-// ══════════════════════════════════════════════════════
-//  Column mapping warning badge
-// ══════════════════════════════════════════════════════
-function MappingBadge({ headers, headerMap }: { headers: string[]; headerMap: Record<string,string> }) {
-  const mapped   = Object.keys(headerMap)
-  const unmapped = headers.filter(h => !mapped.includes(h))
-  const required = ['model_name', 'line', 'quantity', 'shift', 'production_date']
-  const mappedFields = Object.values(headerMap)
-  const missingRequired = required.filter(f => !mappedFields.includes(f))
-
-  if (missingRequired.length === 0 && unmapped.length === 0) return null
-
-  return (
-    <div style={{
-      margin:'0 20px 12px',
-      background: missingRequired.length > 0 ? '#FEF3C7' : '#EFF6FF',
-      border:`1px solid ${missingRequired.length > 0 ? '#FCD34D' : '#BFDBFE'}`,
-      borderRadius:8, padding:'10px 14px', fontSize:12,
-    }}>
-      {missingRequired.length > 0 && (
-        <div style={{ color:'#92400E', fontWeight:600, marginBottom:4 }}>
-          ⚠ Column ที่ต้องมีแต่ยังไม่พบ: <span style={{ fontFamily:'monospace' }}>{missingRequired.join(', ')}</span>
-        </div>
-      )}
-      {unmapped.length > 0 && (
-        <div style={{ color:'#1e40af' }}>
-          Column ที่ไม่รู้จัก (จะถูกข้าม): <span style={{ fontFamily:'monospace' }}>{unmapped.join(', ')}</span>
-        </div>
-      )}
-      <div style={{ color:'#6b7280', marginTop:4 }}>
-        Column ที่ map ได้: <span style={{ color:'#059669', fontWeight:600 }}>{mapped.join(', ') || '-'}</span>
-      </div>
-    </div>
-  )
-}
-
-// ══════════════════════════════════════════════════════
-//  Lazy initializer — อ่าน token ครั้งเดียวตอน mount
-// ══════════════════════════════════════════════════════
-function initOperatorName(): string {
-  const payload = getTokenPayload()
-  return payload?.full_name ?? ''
 }
 
 // ══════════════════════════════════════════════════════
 //  Page
 // ══════════════════════════════════════════════════════
 export default function VolumeFormPage() {
-  const [shift,          setShift]          = useState<'A'|'B'>('A')
-  const [operatorName]                      = useState<string>(initOperatorName)
-  const [uploadedFile,   setUploadedFile]   = useState<UploadedFile | null>(null)
-  const [dragging,       setDragging]       = useState(false)
-  const [parsing,        setParsing]        = useState(false)
-  const [submitLoading,  setSubmitLoading]  = useState(false)
-  const [submitProgress, setSubmitProgress] = useState({ current: 0, total: 0 })
-  const [selectedIds,    setSelectedIds]    = useState<Set<number>>(new Set())
-  const [showSuccess,    setShowSuccess]    = useState(false)
-  const [successCount,   setSuccessCount]   = useState(0)
-  const [toasts,         setToasts]         = useState<ToastMsg[]>([])
-  const [todayStr,       setTodayStr]       = useState('')
-  const [headerMap,      setHeaderMap]      = useState<Record<string,string>>({})
+  const [shift,         setShift]         = useState<'A'|'B'>('A')
+  const [operatorName,  setOperatorName]  = useState('')
+  const [uploadedFile,  setUploadedFile]  = useState<UploadedFile | null>(null)
+  const [dragging,      setDragging]      = useState(false)
+  const [parsing,       setParsing]       = useState(false)
+  const [submitLoading, setSubmitLoading] = useState(false)
+  const [submitLabel,   setSubmitLabel]   = useState('')
+  const [showSuccess,   setShowSuccess]   = useState(false)
+  const [successCount,  setSuccessCount]  = useState(0)
+  const [toasts,        setToasts]        = useState<ToastMsg[]>([])
+  const [todayStr,      setTodayStr]      = useState('')
+  const [headerMap,     setHeaderMap]     = useState<Record<string,string>>({})
 
   const toastCounter = useRef(0)
   const toastTimers  = useRef<Map<number, ReturnType<typeof setTimeout>>>(new Map())
   const fileInputRef = useRef<HTMLInputElement>(null)
 
   useEffect(() => {
+    const payload = getTokenPayload()
+    if (payload?.full_name) setOperatorName(payload.full_name)
+  }, [])
+
+  useEffect(() => {
     const update = () => {
-      const now        = new Date()
-      const day        = now.getDate()
-      const month      = now.toLocaleString('en-US', { month: 'short' })
-      const year       = now.getFullYear()
-      const hh         = String(now.getHours()).padStart(2, '0')
-      const mm         = String(now.getMinutes()).padStart(2, '0')
-      const h          = now.getHours() * 60 + now.getMinutes()
-      const shiftLabel = h >= 7 * 60 + 30 && h <= 19 * 60 + 50 ? 'Day' : 'Night'
-      setTodayStr(`${day} ${month} ${year} ${hh}:${mm} - ${shiftLabel}`)
+      const now   = new Date()
+      const day   = now.getDate()
+      const month = now.toLocaleString('en-US', { month: 'short' })
+      const year  = now.getFullYear()
+      const hh    = String(now.getHours()).padStart(2, '0')
+      const mm    = String(now.getMinutes()).padStart(2, '0')
+      const h     = now.getHours() * 60 + now.getMinutes()
+      const s     = h >= 7 * 60 + 30 && h <= 19 * 60 + 50 ? 'Day' : 'Night'
+      setTodayStr(`${day} ${month} ${year} ${hh}:${mm} - ${s}`)
     }
     update()
     const id = setInterval(update, 1000)
@@ -407,9 +366,9 @@ export default function VolumeFormPage() {
       const hMap = mapHeaders(headers)
       setHeaderMap(hMap)
       setUploadedFile({ id:`${Date.now()}`, name:file.name, size:file.size, rows, headers })
-      setSelectedIds(new Set())
 
-      const required = ['model_name', 'line', 'quantity', 'shift', 'production_date']
+      // แจ้งเตือน column ที่ map ไม่ได้
+      const required = ['model_name', 'quantity', 'shift', 'production_date']
       const mappedFields = Object.values(hMap)
       const missing = required.filter(f => !mappedFields.includes(f))
       if (missing.length > 0) {
@@ -418,8 +377,7 @@ export default function VolumeFormPage() {
         showToast(`โหลดสำเร็จ ${rows.length} rows — พบ column ครบถ้วน`, 'info')
       }
     } catch (err) {
-      console.error(err)
-      showToast('ไม่สามารถอ่านไฟล์ได้')
+      showToast(err instanceof Error ? err.message : 'ไม่สามารถอ่านไฟล์ได้')
     } finally {
       setParsing(false)
     }
@@ -437,42 +395,13 @@ export default function VolumeFormPage() {
     if (file) handleFile(file)
   }
 
-  const removeFile = () => { setUploadedFile(null); setSelectedIds(new Set()); setHeaderMap({}) }
+  const removeFile = () => { setUploadedFile(null); setHeaderMap({}) }
 
-  // ── Row selection ──
-  // ── Fix: เปลี่ยน ternary expression เป็น if/else statement ──
-  const toggleSelect = (idx: number) =>
-    setSelectedIds(prev => {
-      const n = new Set(prev)
-      if (n.has(idx)) {
-        n.delete(idx)
-      } else {
-        n.add(idx)
-      }
-      return n
-    })
-
-  const toggleSelectAll = () => {
-    if (!uploadedFile) return
-    setSelectedIds(selectedIds.size === uploadedFile.rows.length
-      ? new Set()
-      : new Set(uploadedFile.rows.map((_, i) => i)))
-  }
-
-  const deleteSelected = () => {
-    if (!uploadedFile) return
-    const newRows = uploadedFile.rows.filter((_, i) => !selectedIds.has(i))
-    if (newRows.length === 0) { setUploadedFile(null); setSelectedIds(new Set()); setHeaderMap({}); return }
-    setUploadedFile({ ...uploadedFile, rows: newRows })
-    setSelectedIds(new Set())
-  }
-
-  // ── Build body จาก row ──
-  function buildBody(row: Record<string,unknown>): Record<string,unknown> {
-    const body: Record<string,unknown> = {
+  // ── Build row body ──
+  function buildBody(row: Record<string, unknown>): Record<string, unknown> {
+    const body: Record<string, unknown> = {
       name:             operatorName || '',
       shift:            shift,
-      line:             '',
       part_no:          '',
       core_no:          '',
       model_name:       '',
@@ -493,73 +422,120 @@ export default function VolumeFormPage() {
 
     for (const [excelCol, fieldName] of Object.entries(headerMap)) {
       const raw = row[excelCol]
+      const val = formatCellValue(excelCol, raw)
       if (fieldName === 'quantity') {
         body['quantity'] = parseInt(String(raw ?? '0'), 10) || 0
       } else if (fieldName === 'shift') {
-        const s = formatCell(excelCol, raw).trim().toUpperCase()
+        const s = String(val).trim().toUpperCase()
         body['shift'] = s.startsWith('A') ? 'A' : s.startsWith('B') ? 'B' : shift
       } else {
-        body[fieldName] = formatCell(excelCol, raw)
+        body[fieldName] = val
       }
     }
 
     return body
   }
 
-  // ── Submit ──
+  // ══════════════════════════════════════════════════════
+  //  Submit — Bulk (1 request ส่ง rows ทั้งหมด)
+  // ══════════════════════════════════════════════════════
   const handleSubmit = async () => {
-    if (!operatorName) { showToast('ไม่พบชื่อ Operator กรุณาเข้าสู่ระบบใหม่'); return }
-    if (!uploadedFile) { showToast('กรุณาอัพโหลดไฟล์ก่อน'); return }
+    if (!operatorName)      { showToast('ไม่พบชื่อ Operator กรุณาเข้าสู่ระบบใหม่'); return }
+    if (!uploadedFile)      { showToast('กรุณาอัพโหลดไฟล์ก่อน'); return }
     if (uploadedFile.rows.length === 0) { showToast('ไม่มีข้อมูลในไฟล์'); return }
 
-    const required = ['model_name', 'line', 'quantity', 'shift', 'production_date']
+    // ตรวจ required fields
+    const required     = ['model_name', 'quantity', 'shift', 'production_date']
     const mappedFields = Object.values(headerMap)
-    const missing = required.filter(f => !mappedFields.includes(f))
+    const missing      = required.filter(f => !mappedFields.includes(f))
     if (missing.length > 0) {
       showToast(`ไม่พบ column ที่จำเป็น: ${missing.join(', ')}\nกรุณาตรวจสอบชื่อ column ในไฟล์`, 'error')
       return
     }
 
-    const rowsToSubmit = uploadedFile.rows
     setSubmitLoading(true)
-    setSubmitProgress({ current: 0, total: rowsToSubmit.length })
+    setSubmitLabel(`กำลังเตรียม ${uploadedFile.rows.length} rows…`)
 
-    let successCnt  = 0
+    try {
+      // สร้าง payload ทั้งหมดในครั้งเดียว
+      const payload = uploadedFile.rows.map(row => buildBody(row))
+
+      setSubmitLabel(`ส่งข้อมูล ${payload.length} rows ไปยัง server…`)
+
+      // ── Bulk request: POST /form/volume/bulk ──────────────────────
+      const r = await fetch(`${API}/form/volume/bulk`, {
+        method:  'POST',
+        headers: authHeaders(),
+        body:    JSON.stringify({ rows: payload }),
+      })
+
+      if (!r.ok) {
+        // Fallback: ถ้า backend ยังไม่รองรับ /bulk ให้ใช้ chunked batching
+        if (r.status === 404 || r.status === 405) {
+          await submitInChunks(payload)
+          return
+        }
+        const d = await r.json().catch(() => ({}))
+        throw new Error(d.detail || `HTTP ${r.status}`)
+      }
+
+      const result = await r.json()
+      const inserted = result.inserted ?? payload.length
+
+      setSuccessCount(inserted)
+      setShowSuccess(true)
+      setUploadedFile(null)
+      setHeaderMap({})
+    } catch (err) {
+      showToast(err instanceof Error ? err.message : 'เกิดข้อผิดพลาดในการบันทึก', 'error')
+    } finally {
+      setSubmitLoading(false)
+      setSubmitLabel('')
+    }
+  }
+
+  // ── Fallback: chunked batching (500 rows/chunk) ─────────────────────
+  async function submitInChunks(payload: Record<string, unknown>[]) {
+    const CHUNK_SIZE = 500
+    let successCnt   = 0
     const errors: string[] = []
 
-    for (let i = 0; i < rowsToSubmit.length; i++) {
-      const body = buildBody(rowsToSubmit[i])
+    for (let i = 0; i < payload.length; i += CHUNK_SIZE) {
+      const chunk = payload.slice(i, i + CHUNK_SIZE)
+      setSubmitLabel(`ส่ง ${Math.min(i + CHUNK_SIZE, payload.length)} / ${payload.length} rows…`)
       try {
         const r = await fetch(`${API}/form/volume`, {
           method:  'POST',
           headers: authHeaders(),
-          body:    JSON.stringify(body),
+          body:    JSON.stringify(chunk.length === 1 ? chunk[0] : chunk),
         })
         if (r.ok) {
-          successCnt++
+          successCnt += chunk.length
         } else {
-          const d = await r.json().catch(() => ({})) as { detail?: string }
-          errors.push(`Row ${i+1}: ${d.detail ?? `HTTP ${r.status}`}`)
+          const d = await r.json().catch(() => ({}))
+          errors.push(`Chunk ${Math.floor(i/CHUNK_SIZE)+1}: ${d.detail || `HTTP ${r.status}`}`)
         }
       } catch {
-        errors.push(`Row ${i+1}: connection error`)
+        errors.push(`Chunk ${Math.floor(i/CHUNK_SIZE)+1}: connection error`)
       }
-      setSubmitProgress({ current: i + 1, total: rowsToSubmit.length })
     }
 
     setSubmitLoading(false)
+    setSubmitLabel('')
 
     if (errors.length > 0 && successCnt === 0) {
-      showToast(`บันทึกไม่สำเร็จ:\n${errors.slice(0,5).join('\n')}${errors.length>5?`\n…และอีก ${errors.length-5} รายการ`:''}`, 'error')
+      showToast(`บันทึกไม่สำเร็จ:\n${errors.slice(0,5).join('\n')}`, 'error')
     } else if (errors.length > 0) {
-      showToast(`บันทึกสำเร็จ ${successCnt} rows\nล้มเหลว ${errors.length} rows:\n${errors.slice(0,3).join('\n')}`, 'warn')
+      showToast(`บันทึกสำเร็จ ${successCnt} rows\nล้มเหลว ${errors.length} chunks`, 'warn')
       setSuccessCount(successCnt)
       setShowSuccess(true)
-      setUploadedFile(null); setSelectedIds(new Set()); setHeaderMap({})
+      setUploadedFile(null)
+      setHeaderMap({})
     } else {
       setSuccessCount(successCnt)
       setShowSuccess(true)
-      setUploadedFile(null); setSelectedIds(new Set()); setHeaderMap({})
+      setUploadedFile(null)
+      setHeaderMap({})
     }
   }
 
@@ -570,7 +546,7 @@ export default function VolumeFormPage() {
     <div className="page active dfp-page">
 
       <ToastContainer toasts={toasts} onDismiss={dismissToast} />
-      {submitLoading && <SubmitProgress current={submitProgress.current} total={submitProgress.total} />}
+      {submitLoading && <SubmitProgress label={submitLabel} />}
 
       {/* ── Header bar ── */}
       <div className="dfp-header-bar" style={{ background: 'transparent', borderBottom: 'none', paddingBottom: 0 }}>
@@ -594,7 +570,8 @@ export default function VolumeFormPage() {
             <div className="dfp-select-wrap">
               <span className="dfp-input-icon"><IconUser /></span>
               <span style={{
-                flex:1, padding:'8px 0', fontSize:13, fontFamily:'inherit',
+                flex:1, padding:'8px 0', fontSize:13,
+                fontFamily:'inherit',
                 color: operatorName ? '#111827' : '#9ca3af',
                 whiteSpace:'nowrap', overflow:'hidden', textOverflow:'ellipsis',
               }}>
@@ -607,7 +584,7 @@ export default function VolumeFormPage() {
           </div>
 
           <div className="dfp-info-field">
-            <label className="dfp-info-label">Default Shift <span style={{ fontSize:10, color:'#9ca3af', fontWeight:400 }}>(ถ้าไม่มีใน file)</span></label>
+            <label className="dfp-info-label">Shift</label>
             <div className="dfp-shift-toggle">
               {(['A', 'B'] as const).map(s => (
                 <button key={s} type="button" className={`dfp-shift-btn${shift === s ? ' active' : ''}`} onClick={() => setShift(s)}>
@@ -628,27 +605,78 @@ export default function VolumeFormPage() {
         <div className="dfp-card dfp-table-card" style={{ flex:749 }}>
 
           <div className="dfp-table-header">
-            <div className="dfp-step-label">
-              <span className="dfp-step-num">1.</span>
-              Upload Volume File
-              <span style={{ fontSize:11.5, fontWeight:400, color:'#9ca3af' }}>(.xlsx / .xls / .csv)</span>
-            </div>
-            <div style={{ display:'flex', alignItems:'center', gap:8 }}>
+            <div style={{ display:'flex', alignItems:'center', gap:10 }}>
               {uploadedFile && (
-                <span style={{ fontSize:11, color:'#6b7280' }}>
-                  {uploadedFile.rows.length} rows
-                  {selectedIds.size > 0 && <span style={{ color:'#1462FF', marginLeft:6 }}>· {selectedIds.size} selected</span>}
-                </span>
+                <div style={{ display:'flex', alignItems:'center', gap:8, background:'#f0f5ff', border:'1px solid #c7d9ff', borderRadius:8, padding:'5px 12px' }}>
+                  <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="#1462FF" strokeWidth="2.2" strokeLinecap="round">
+                    <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/>
+                    <polyline points="14 2 14 8 20 8"/>
+                  </svg>
+                  <span style={{ fontSize:12.5, fontWeight:600, color:'#1462FF' }}>{uploadedFile.name}</span>
+                  <span style={{ fontSize:11, color:'#93c5fd' }}>{formatBytes(uploadedFile.size)}</span>
+                  <span style={{ fontSize:11, background:'#1462FF', color:'#fff', borderRadius:4, padding:'1px 6px', fontWeight:600 }}>
+                    {uploadedFile.rows.length} rows
+                  </span>
+                </div>
               )}
-              <button className={`dfp-delete-btn${!uploadedFile ? ' disabled' : ''}`} onClick={removeFile} disabled={!uploadedFile} title="Delete file">
-                <IconTrash />
-              </button>
             </div>
+            <button
+              className={`dfp-delete-btn${!uploadedFile ? ' disabled' : ''}`}
+              onClick={removeFile}
+              disabled={!uploadedFile}
+              title="Delete file"
+            >
+              <IconTrash />
+            </button>
           </div>
 
           <input ref={fileInputRef} type="file" accept=".xlsx,.xls,.csv" style={{ display:'none' }} onChange={onInputChange} />
 
-          {uploadedFile && <MappingBadge headers={uploadedFile.headers} headerMap={headerMap} />}
+          {/* Preview table */}
+          {uploadedFile && uploadedFile.rows.length > 0 && (
+            <div style={{ margin:'0 20px 16px', border:'1px solid #e5e7eb', borderRadius:10, overflow:'hidden' }}>
+              <div style={{ padding:'8px 14px', background:'#f9fafb', borderBottom:'1px solid #e5e7eb', display:'flex', alignItems:'center', justifyContent:'space-between' }}>
+                <span style={{ fontSize:11, fontWeight:600, color:'#6b7280' }}>PREVIEW (5 rows)</span>
+                <div style={{ display:'flex', gap:6 }}>
+                  {Object.entries(headerMap).map(([col, field]) => (
+                    <span key={col} style={{ fontSize:10, background:'#e0e7ff', color:'#3730a3', borderRadius:4, padding:'2px 6px' }}>
+                      {col} → {field}
+                    </span>
+                  ))}
+                </div>
+              </div>
+              <div style={{ overflowX:'auto', maxHeight:180 }}>
+                <table style={{ width:'100%', borderCollapse:'collapse', fontSize:11.5, whiteSpace:'nowrap' }}>
+                  <thead>
+                    <tr>
+                      {uploadedFile.headers.map(h => (
+                        <th key={h} style={{
+                          padding:'6px 12px', textAlign:'left', fontWeight:600,
+                          fontSize:11, color: headerMap[h] ? '#1462FF' : '#9ca3af',
+                          background:'#f9fafb', borderBottom:'1px solid #e5e7eb',
+                          borderRight:'1px solid #e5e7eb', position:'sticky', top:0,
+                        }}>
+                          {h}
+                          {headerMap[h] && <span style={{ marginLeft:4, fontSize:9, color:'#93c5fd' }}>→{headerMap[h]}</span>}
+                        </th>
+                      ))}
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {uploadedFile.rows.slice(0, 5).map((row, i) => (
+                      <tr key={i} style={{ background: i % 2 === 0 ? '#fff' : '#fafafa' }}>
+                        {uploadedFile.headers.map(h => (
+                          <td key={h} style={{ padding:'5px 12px', borderBottom:'1px solid #f0f0f0', borderRight:'1px solid #f0f0f0', color:'#374151' }}>
+                            {formatCellValue(h, row[h])}
+                          </td>
+                        ))}
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          )}
 
           {/* Drop zone */}
           {!uploadedFile && (
@@ -664,6 +692,7 @@ export default function VolumeFormPage() {
                 background: dragging ? 'rgba(20,98,255,.04)' : '#fafafa',
                 display:'flex', flexDirection:'column', alignItems:'center', justifyContent:'center',
                 gap:12, cursor:'pointer', transition:'border-color .15s, background .15s',
+                minHeight: 220,
               }}
             >
               <div style={{
@@ -679,94 +708,15 @@ export default function VolumeFormPage() {
                   {parsing ? 'Reading file…' : 'Click here to upload file'}
                 </div>
                 <div style={{ fontSize:12, color:'#9ca3af', marginTop:4 }}>
-                  or drag &amp; drop .xlsx / .xls / .csv
+                  or drag &amp; drop .xlsx / .csv
                 </div>
-              </div>
-              <div style={{ fontSize:11, color:'#bbb', textAlign:'center', padding:'0 24px' }}>
-                Column ที่รองรับ: <span style={{ fontFamily:'monospace', color:'#9ca3af' }}>Model, Line, Quantity, Shift, Production Date, Production Time, Part No, Core No, …</span>
+                <div style={{ fontSize:11, color:'#c4b5fd', marginTop:8 }}>
+                  รองรับ bulk upload — ไม่จำกัดจำนวน rows
+                </div>
               </div>
             </div>
           )}
 
-          {/* Table after upload */}
-          {uploadedFile && (
-            <>
-              <div style={{
-                display:'flex', alignItems:'center', gap:10, padding:'8px 20px',
-                background:'rgba(20,98,255,.04)', borderBottom:'1px solid #f0f5ff', flexShrink:0,
-              }}>
-                <div style={{ width:32, height:32, background:'rgba(20,98,255,.10)', borderRadius:8, display:'flex', alignItems:'center', justifyContent:'center', color:'#1462FF', flexShrink:0 }}>
-                  <IconFileSmall />
-                </div>
-                <div style={{ flex:1, minWidth:0 }}>
-                  <div style={{ fontSize:13, fontWeight:700, color:'#111827', overflow:'hidden', textOverflow:'ellipsis', whiteSpace:'nowrap' }}>
-                    {uploadedFile.name}
-                  </div>
-                  <div style={{ fontSize:11, color:'#9ca3af', marginTop:1 }}>
-                    {uploadedFile.rows.length} rows · {formatBytes(uploadedFile.size)}
-                    {selectedIds.size > 0 && <span style={{ color:'#1462FF', marginLeft:8 }}>· {selectedIds.size} selected</span>}
-                  </div>
-                </div>
-                <button
-                  onClick={deleteSelected}
-                  disabled={selectedIds.size === 0}
-                  style={{
-                    display:'flex', alignItems:'center', gap:5, padding:'5px 12px',
-                    background: selectedIds.size === 0 ? 'transparent' : 'rgba(239,83,83,.08)',
-                    border:`1px solid ${selectedIds.size === 0 ? '#e5e7eb' : 'rgba(239,83,83,.30)'}`,
-                    borderRadius:8, color: selectedIds.size === 0 ? '#d1d5db' : '#EF5353',
-                    fontSize:12, fontWeight:700, cursor: selectedIds.size === 0 ? 'not-allowed' : 'pointer',
-                    fontFamily:'inherit', transition:'all .12s', flexShrink:0,
-                  }}
-                >
-                  <IconX />
-                  Remove{selectedIds.size > 0 ? ` (${selectedIds.size})` : ''}
-                </button>
-              </div>
-
-              <div className="dfp-table-wrap">
-                <table className="dfp-table">
-                  <thead>
-                    <tr>
-                      <th className="dfp-th dfp-th-check">
-                        <input type="checkbox" className="dfp-checkbox"
-                          checked={uploadedFile.rows.length > 0 && selectedIds.size === uploadedFile.rows.length}
-                          onChange={toggleSelectAll} />
-                      </th>
-                      <th className="dfp-th" style={{ color:'#9ca3af', width:52 }}>#</th>
-                      {uploadedFile.headers.map(h => (
-                        <th key={h} className="dfp-th">
-                          <div style={{ display:'flex', alignItems:'center', gap:4 }}>
-                            {h}
-                            {headerMap[h] && (
-                              <span style={{ fontSize:9, background:'#d1fae5', color:'#065f46', borderRadius:4, padding:'1px 5px', fontWeight:700 }}>
-                                ✓ {headerMap[h]}
-                              </span>
-                            )}
-                          </div>
-                        </th>
-                      ))}
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {uploadedFile.rows.map((row, idx) => (
-                      <tr key={idx} className={selectedIds.has(idx) ? 'dfp-row-selected' : ''}>
-                        <td className="dfp-td dfp-td-check">
-                          <input type="checkbox" className="dfp-checkbox" checked={selectedIds.has(idx)} onChange={() => toggleSelect(idx)} />
-                        </td>
-                        <td className="dfp-td" style={{ color:'#9ca3af', fontSize:11.5 }}>{idx + 1}</td>
-                        {uploadedFile.headers.map(h => (
-                          <td key={h} className="dfp-td" style={{ maxWidth:200, overflow:'hidden', textOverflow:'ellipsis' }}>
-                            {formatCell(h, row[h])}
-                          </td>
-                        ))}
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
-            </>
-          )}
         </div>
       </div>
 

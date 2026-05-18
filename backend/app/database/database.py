@@ -21,10 +21,7 @@ DUCKDB_PATH  = str(BASE_DIR / "data" / "app.duckdb")
 
 MODEL_PATH      = os.getenv("MODEL")
 DEFECT_PATH     = os.getenv("DEFECT")
-EMPLOYEE_PATH   = os.getenv("EMPLOYEE")
 DEFECTFORM_PATH = os.getenv("DEFECT_HISTORY")
-VOLUMEFORM_PATH = os.getenv("VOLUME_HISTORY")
-REPORTFORM_PATH = os.getenv("REPORT_HISTORY")
 
 engine       = create_engine(DATABASE_URL, connect_args={"check_same_thread": False})
 SessionLocal = sessionmaker(bind=engine)
@@ -108,7 +105,6 @@ def _default_password(work_number: str) -> str:
     from passlib.context import CryptContext
     _ctx = CryptContext(schemes=["bcrypt"], deprecated="auto")
     return _ctx.hash(work_number)
-
 
 def parse_model_qr(model_qr: str) -> dict:
     return {
@@ -194,7 +190,6 @@ class CorrectionNote(Base):
     defect_type    = Column(String, nullable=False)
     changing_point = Column(String, nullable=False)
     created_at     = Column(DateTime, default=datetime.now)
-
 
 # ─── CSV Loader ───────────────────────────────────────────────────── #
 def load_csv_to_db():
@@ -301,45 +296,7 @@ def load_csv_to_db():
                 db.rollback()
                 print(f"[csv] Employee FAILED: {e}")
 
-        # ══ 4. Volume history ═════════════════════════════════════════
-        # ต้อง commit Model ก่อน เพราะ Volume.model_name FK → model.model_name
-        if VOLUMEFORM_PATH and db.query(Volume).count() == 0:
-            print(f"[csv] loading Volume from {VOLUMEFORM_PATH}")
-            # สร้าง set ของ model_name ที่มีอยู่จริงใน DB
-            valid_models = {r.model_name for r in db.query(Model.model_name).all()}
-            try:
-                df = pd.read_csv(VOLUMEFORM_PATH)
-                skipped = 0
-                for _, row in df.iterrows():
-                    model_name = str(row["Model"]).strip()
-                    if model_name not in valid_models:
-                        print(f"[csv] Volume skip: model '{model_name}' not in DB")
-                        skipped += 1
-                        continue
-                    try:
-                        shift, group = _parse_shift_group(str(row["Shift"]))
-                        scan_dt = datetime.strptime(
-                            f"{row['Scan date']} {row['Scan time']}", "%d-%m-%Y %H:%M:%S"
-                        )
-                        db.add(Volume(
-                            model_name = model_name,
-                            quantity   = int(row["Quantity"]),
-                            line       = str(row["Line"]).strip(),
-                            prod_date  = str(row["Production date"]).strip(),
-                            shift      = shift,
-                            group      = group,
-                            scan_date  = scan_dt.date(),
-                            scan_time  = scan_dt.time(),
-                        ))
-                    except Exception as row_err:
-                        skipped += 1
-                        print(f"[csv] Volume row skip: {row_err}")
-                        db.rollback()
-                db.commit()
-                print(f"[csv] Volume loaded ({len(df) - skipped} rows, {skipped} skipped)")
-            except Exception as e:
-                db.rollback()
-                print(f"[csv] Volume FAILED: {e}")
+
 
         # ══ 5. Defect history ══════════════════════════════════════════
         # FK: employee.name, model.part_no, defect_mode.defect_item
@@ -399,7 +356,6 @@ def load_csv_to_db():
 
     finally:
         db.close()
-
 
 # ─── Session / Init ───────────────────────────────────────────────── #
 def get_db():

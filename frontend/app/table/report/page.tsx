@@ -1,346 +1,446 @@
-// 'use client'
+'use client'
 
-// import { useEffect, useState } from 'react'
+import { useState, useEffect, useCallback } from 'react'
+import { API, authHeaders } from '../../shared'
 
-// // ── API Base ───────────────────────────────────────────────────────
-// const API = 'http://localhost:8000'
+// ─── Types ───────────────────────────────────────────────────────────────────
+interface SubmittedReport {
+  no:           number
+  title:        string
+  submitted_at: string
+  has_pdf:      boolean
+}
 
-// // ── Types ──────────────────────────────────────────────────────────
-// interface ReportFilters {
-//   dateFrom: string
-//   dateTo:   string
-//   status:   string
-//   mode:     string
-// }
+interface ReportRow {
+  modeName:          string
+  assumptionDetail:  string
+  assumptionPicture: string
+  actionDetail:      string
+  actionPicture:     string
+  dueDateStart:      string
+  dueDateEnd:        string
+  pic:               string
+  progress:          number
+  status:            string
+}
 
-// // ── Helpers ────────────────────────────────────────────────────────
-// const fmtIsoDate = (raw: string) => {
-//   if (!raw) return raw
-//   const parts = String(raw).slice(0,10).split('-')
-//   if (parts.length !== 3) return raw
-//   return `${parts[2]}/${parts[1]}/${parts[0]}`
-// }
+// ─── Design tokens (match report page) ───────────────────────────────────────
+const T = {
+  bg:        '#F8FAFC',
+  surface:   '#FFFFFF',
+  border:    '#E8ECF0',
+  blue:      '#1462FF',
+  blueSoft:  '#EEF4FF',
+  text:      '#111827',
+  textSub:   '#6B7280',
+  textMuted: '#9CA3AF',
+  rowEven:   '#FFFFFF',
+  rowOdd:    '#F8FAFD',
+  shadow:    '0 1px 3px rgba(20,98,255,.06), 0 1px 2px rgba(0,0,0,.04)',
+  shadowMd:  '0 4px 16px rgba(20,98,255,.10), 0 2px 6px rgba(0,0,0,.06)',
+  danger:    '#C0001A',
+}
 
-// function emptyFilters(): ReportFilters {
-//   return { dateFrom: '', dateTo: '', status: '', mode: '' }
-// }
+// ─── Status badge ─────────────────────────────────────────────────────────────
+const STATUS_COLORS: Record<string, string> = {
+  'Pending':     '#9e9e9e',
+  'In Progress': '#F5A623',
+  'Done':        '#7BC67A',
+  'Issue':       '#C0001A',
+}
 
-// const getTodayStr = () => {
-//   const now   = new Date()
-//   const day   = now.getDate()
-//   const month = now.toLocaleString('en-US', { month: 'short' })
-//   const year  = now.getFullYear()
-//   const hh    = String(now.getHours()).padStart(2, '0')
-//   const mm    = String(now.getMinutes()).padStart(2, '0')
-//   const h     = now.getHours() * 60 + now.getMinutes()
-//   const shift = h >= 7 * 60 + 30 && h <= 19 * 60 + 50 ? 'Day' : 'Night'
-//   return `${day} ${month} ${year} ${hh}:${mm} - ${shift}`
-// }
+const StatusBadge = ({ value }: { value: string }) => {
+  const color = STATUS_COLORS[value] ?? '#9CA3AF'
+  return (
+    <span style={{ display: 'inline-flex', alignItems: 'center', gap: 5, padding: '3px 10px', borderRadius: 20, background: color + '18', border: `1.5px solid ${color}44`, fontSize: 11, fontWeight: 700, color, whiteSpace: 'nowrap' }}>
+      <span style={{ width: 6, height: 6, borderRadius: '50%', background: color, flexShrink: 0 }} />
+      {value || '—'}
+    </span>
+  )
+}
 
-// // ── Column definitions ─────────────────────────────────────────────
-// const COLS: { key: string; label: string }[] = [
-//   { key: 'no',                label: 'No.'              },
-//   { key: 'mode',              label: 'Mode'             },
-//   { key: 'assumption_detail', label: 'Assumption Detail'},
-//   { key: 'action_detail',     label: 'Action Detail'    },
-//   { key: 'date_day',          label: 'Date'             },
-//   { key: 'pic',               label: 'PIC'              },
-//   { key: 'progress',          label: 'Progress'         },
-//   { key: 'status',            label: 'Status'           },
-// ]
+// ─── Pizza visual (read-only) ────────────────────────────────────────────────
+const PizzaDisplay = ({ value }: { value: number }) => {
+  const size = 28, cx = 14, cy = 14, r = 11
+  const slices: [number, number][] = [[0,25],[25,50],[50,75],[75,100]]
+  const filledSlices = value / 25
+  const toRad = (p: number) => (p / 100) * 2 * Math.PI - Math.PI / 2
+  const slicePath = (s: number, e: number) => {
+    const x1 = cx + r * Math.cos(toRad(s)), y1 = cy + r * Math.sin(toRad(s))
+    const x2 = cx + r * Math.cos(toRad(e)), y2 = cy + r * Math.sin(toRad(e))
+    return `M${cx},${cy} L${x1},${y1} A${r},${r} 0 ${e-s>50?1:0} 1 ${x2},${y2} Z`
+  }
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 2 }}>
+      <svg width={size} height={size} viewBox={`0 0 ${size} ${size}`}>
+        <circle cx={cx} cy={cy} r={r} fill={T.blueSoft} />
+        {slices.map(([s, e], i) => (
+          <path key={i} d={slicePath(s, e)} fill={i < filledSlices ? T.blue : 'transparent'} stroke="#fff" strokeWidth={1.2} />
+        ))}
+        {slices.map(([s], i) => {
+          const rad = (s/100)*2*Math.PI - Math.PI/2
+          return <line key={i} x1={cx} y1={cy} x2={cx+r*Math.cos(rad)} y2={cy+r*Math.sin(rad)} stroke="#fff" strokeWidth={1.2} />
+        })}
+        <circle cx={cx} cy={cy} r={r} fill="none" stroke={T.border} strokeWidth={1} />
+      </svg>
+      <span style={{ fontSize: 9, fontWeight: 700, color: T.blue }}>{value}%</span>
+    </div>
+  )
+}
 
-// // ── Icons ──────────────────────────────────────────────────────────
-// const IconSearch = () => (
-//   <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="#bbb" strokeWidth="2" strokeLinecap="round">
-//     <circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/>
-//   </svg>
-// )
-// const IconFilter = () => (
-//   <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
-//     <line x1="4" y1="6" x2="20" y2="6"/><line x1="8" y1="12" x2="16" y2="12"/><line x1="11" y1="18" x2="13" y2="18"/>
-//   </svg>
-// )
-// const IconRefresh = () => (
-//   <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round">
-//     <polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/>
-//   </svg>
-// )
+// ─── PDF Viewer Modal ────────────────────────────────────────────────────────
+const PdfModal = ({ no, title, onClose }: { no: number; title: string; onClose: () => void }) => {
+  const [pdfSrc, setPdfSrc]   = useState<string | null>(null)
+  const [loading, setLoading] = useState(true)
+  const [rows, setRows]       = useState<ReportRow[]>([])
+  const [view, setView]       = useState<'pdf' | 'table'>('pdf')
 
-// // ── Filter Panel styles ────────────────────────────────────────────
-// const fpStyle = {
-//   panel: { position:'fixed' as const, top:130, right:28, width:360, background:'#fff', border:'1px solid #e5e7eb', borderRadius:14, boxShadow:'0 8px 30px rgba(0,0,0,.10)', zIndex:300, display:'flex', flexDirection:'column' as const },
-//   header: { display:'flex', alignItems:'center', justifyContent:'space-between', padding:'12px 16px 10px', flexShrink:0 },
-//   title:  { fontSize:14, fontWeight:700, color:'#000' },
-//   close:  { background:'none', border:'none', color:'#9ca3af', fontSize:16, cursor:'pointer', padding:'2px 6px', borderRadius:6, lineHeight:1, fontFamily:'Sarabun,sans-serif' },
-//   body:   { padding:'0 14px 12px', display:'flex', flexDirection:'column' as const, gap:8 },
-//   group:  { background:'#fff', border:'1px solid #D9D9D9', borderRadius:10, padding:'10px 12px', display:'flex', flexDirection:'column' as const, gap:8 },
-//   row:    { display:'flex', alignItems:'center', gap:10, minHeight:32 },
-//   label:  { fontSize:12.5, fontWeight:600, color:'#1462FF', width:82, flexShrink:0 },
-//   select: { flex:1, height:32, padding:'0 8px', border:'1px solid #D9D9D9', borderRadius:7, fontSize:12.5, background:'#fff', color:'#111827', outline:'none', fontFamily:'Sarabun,sans-serif', cursor:'pointer', minWidth:0 } as React.CSSProperties,
-//   dateInput: { flex:1, height:32, padding:'0 8px', border:'1px solid #D9D9D9', borderRadius:7, fontSize:12, fontFamily:'Sarabun,sans-serif', color:'#111827', background:'#fff', outline:'none', minWidth:0 } as React.CSSProperties,
-//   footer: { display:'flex', gap:8, padding:'10px 14px', borderTop:'1px solid #f3f4f6', flexShrink:0 },
-//   applyBtn: { flex:1, height:36, background:'#1462FF', color:'#fff', border:'none', borderRadius:8, fontSize:13, fontWeight:700, cursor:'pointer', fontFamily:'Sarabun,sans-serif' },
-//   resetBtn: { flex:1, height:36, background:'none', color:'#9ca3af', border:'1px solid #e5e7eb', borderRadius:8, fontSize:13, cursor:'pointer', fontFamily:'Sarabun,sans-serif' },
-// }
+  useEffect(() => {
+    fetch(`${API}/submitted-reports/${no}/pdf`, { headers: authHeaders() })
+      .then(r => r.ok ? r.json() : null)
+      .then(data => {
+        if (data?.pdf_base64) {
+          // Decode base64 HTML → blob URL for iframe
+          const html = decodeURIComponent(escape(atob(data.pdf_base64)))
+          const blob = new Blob([html], { type: 'text/html' })
+          setPdfSrc(URL.createObjectURL(blob))
+        }
+        if (data?.rows_json) {
+          try { setRows(JSON.parse(data.rows_json)) } catch {}
+        }
+        setLoading(false)
+      })
+      .catch(() => setLoading(false))
+    return () => { if (pdfSrc) URL.revokeObjectURL(pdfSrc) }
+  }, [no])
 
-// // ── Filter Panel Component ─────────────────────────────────────────
-// function FilterPanel({ open, onClose, filters, setFilters, modeOpts, statusOpts, onApply, onReset }: {
-//   open: boolean; onClose: () => void
-//   filters: ReportFilters; setFilters: (f: ReportFilters) => void
-//   modeOpts: string[]; statusOpts: string[]
-//   onApply: () => void; onReset: () => void
-// }) {
-//   if (!open) return null
-//   const set = (patch: Partial<ReportFilters>) => setFilters({ ...filters, ...patch })
-//   return (
-//     <>
-//       <div className="fp-backdrop" onClick={onClose} />
-//       <div style={fpStyle.panel}>
-//         <div style={fpStyle.header}>
-//           <span style={fpStyle.title}>Filter</span>
-//           <button style={fpStyle.close} onClick={onClose}>✕</button>
-//         </div>
-//         <div style={fpStyle.body}>
-//           <div style={fpStyle.group}>
-//             <div style={{ display:'flex', flexDirection:'column', gap:8 }}>
-//               <div style={{ display:'flex', alignItems:'center', gap:16 }}>
-//                 <span style={fpStyle.label}>Date</span>
-//               </div>
-//               <div style={{ display:'flex', alignItems:'center', gap:8, paddingLeft:20 }}>
-//                 <input type="date" style={fpStyle.dateInput} value={filters.dateFrom}
-//                   onChange={e => set({ dateFrom:e.target.value })} />
-//                 <span style={{ color:'#d1d5db', fontSize:13, flexShrink:0 }}>—</span>
-//                 <input type="date" style={fpStyle.dateInput} value={filters.dateTo}
-//                   onChange={e => set({ dateTo:e.target.value })} />
-//               </div>
-//             </div>
-//             <div style={fpStyle.row}>
-//               <span style={fpStyle.label}>Mode</span>
-//               <select style={fpStyle.select} value={filters.mode} onChange={e => set({ mode:e.target.value })}>
-//                 <option value="">All</option>
-//                 {modeOpts.map(m => <option key={m} value={m}>{m}</option>)}
-//               </select>
-//             </div>
-//             <div style={fpStyle.row}>
-//               <span style={fpStyle.label}>Status</span>
-//               <select style={fpStyle.select} value={filters.status} onChange={e => set({ status:e.target.value })}>
-//                 <option value="">All</option>
-//                 {statusOpts.map(s => <option key={s} value={s}>{s}</option>)}
-//               </select>
-//             </div>
-//           </div>
-//         </div>
-//         <div style={fpStyle.footer}>
-//           <button style={fpStyle.applyBtn} onClick={() => { onApply(); onClose() }}>Add filter</button>
-//           <button style={fpStyle.resetBtn} onClick={() => { onReset(); onClose() }}>Reset</button>
-//         </div>
-//       </div>
-//     </>
-//   )
-// }
+  const th: React.CSSProperties = { padding: '8px 12px', textAlign: 'left', fontSize: 11, fontWeight: 700, color: T.blue, background: T.blueSoft, border: `1px solid #D1E0FF`, whiteSpace: 'nowrap' }
+  const td: React.CSSProperties = { padding: '8px 12px', verticalAlign: 'middle', border: `1px solid ${T.border}`, fontSize: 12 }
 
-// // ── Confirm Delete Dialog ──────────────────────────────────────────
-// function ConfirmDialog({ rowNo, onCancel, onConfirm, deleting }: {
-//   rowNo: number; onCancel: () => void; onConfirm: () => void; deleting: boolean
-// }) {
-//   return (
-//     <div style={{ position:'fixed', inset:0, background:'rgba(0,0,0,.4)', zIndex:999, display:'flex', alignItems:'center', justifyContent:'center' }}>
-//       <div style={{ background:'#fff', borderRadius:16, padding:'32px 40px', textAlign:'center', minWidth:280, boxShadow:'0 8px 40px rgba(0,0,0,.15)' }}>
-//         <div style={{ fontSize:16, fontWeight:700, marginBottom:8 }}>ยืนยันการลบ?</div>
-//         <div style={{ fontSize:13, color:'#999', marginBottom:24 }}>แถวที่ {rowNo} จะถูกลบออกจากฐานข้อมูล</div>
-//         <div style={{ display:'flex', gap:10, justifyContent:'center' }}>
-//           <button onClick={onCancel} disabled={deleting}
-//             style={{ padding:'9px 24px', borderRadius:10, fontSize:13, border:'1px solid #e5e7eb', background:'#fff', cursor:'pointer', fontFamily:'Sarabun,sans-serif', opacity:deleting?0.5:1 }}>
-//             ยกเลิก
-//           </button>
-//           <button onClick={onConfirm} disabled={deleting}
-//             style={{ padding:'9px 24px', borderRadius:10, fontSize:13, background:'#C0001A', color:'#fff', border:'none', fontWeight:600, cursor:deleting?'not-allowed':'pointer', fontFamily:'Sarabun,sans-serif', opacity:deleting?0.6:1, minWidth:80 }}>
-//             {deleting ? 'กำลังลบ…' : 'ลบ'}
-//           </button>
-//         </div>
-//       </div>
-//     </div>
-//   )
-// }
+  return (
+    <div style={{ position: 'fixed', inset: 0, zIndex: 10000, background: 'rgba(17,24,39,.6)', display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 20 }}>
+      <div style={{ background: T.surface, borderRadius: 16, width: '100%', maxWidth: 1100, height: '90vh', display: 'flex', flexDirection: 'column', boxShadow: '0 24px 64px rgba(0,0,0,.25)', border: `1px solid ${T.border}`, overflow: 'hidden' }}>
 
-// // ── Main Page ──────────────────────────────────────────────────────
-// export default function ReportTablePage() {
-//   const [rows,      setRows]      = useState<Record<string,any>[]>([])
-//   const [loading,   setLoading]   = useState(false)
-//   const [error,     setError]     = useState('')
-//   const [search,    setSearch]    = useState('')
-//   const [filters,   setFilters]   = useState<ReportFilters>(emptyFilters())
-//   const [applied,   setApplied]   = useState<ReportFilters>(emptyFilters())
-//   const [fpOpen,    setFpOpen]    = useState(false)
-//   const [confirmNo, setConfirmNo] = useState<number|null>(null)
-//   const [deleting,  setDeleting]  = useState(false)
-//   const [todayStr,  setTodayStr]  = useState('')
+        {/* Modal header */}
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '16px 24px', borderBottom: `1px solid ${T.border}`, background: T.bg, flexShrink: 0 }}>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
+            <span style={{ fontSize: 15, fontWeight: 700, color: T.text }}>{title}</span>
+            <span style={{ fontSize: 11, color: T.textMuted }}>Table › Report › Preview</span>
+          </div>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+            {/* View toggle */}
+            <div style={{ display: 'flex', background: '#F3F4F6', borderRadius: 8, padding: 3, gap: 2 }}>
+              {(['pdf', 'table'] as const).map(v => (
+                <button key={v} onClick={() => setView(v)}
+                  style={{ padding: '5px 14px', borderRadius: 6, border: 'none', fontSize: 12, fontWeight: 600, cursor: 'pointer', fontFamily: 'Sarabun,sans-serif', transition: 'all .15s', background: view === v ? T.surface : 'transparent', color: view === v ? T.blue : T.textMuted, boxShadow: view === v ? '0 1px 4px rgba(0,0,0,.10)' : 'none' }}>
+                  {v === 'pdf' ? '📄 PDF' : '📋 Table'}
+                </button>
+              ))}
+            </div>
+            <button onClick={onClose}
+              style={{ width: 34, height: 34, borderRadius: 8, border: `1px solid ${T.border}`, background: T.surface, cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center', color: T.textMuted, fontSize: 16, transition: 'all .15s' }}
+              onMouseEnter={e => { e.currentTarget.style.borderColor = T.danger; e.currentTarget.style.color = T.danger }}
+              onMouseLeave={e => { e.currentTarget.style.borderColor = T.border; e.currentTarget.style.color = T.textMuted }}>
+              ✕
+            </button>
+          </div>
+        </div>
 
-//   const [modeOpts,   setModeOpts]   = useState<string[]>([])
-//   const [statusOpts, setStatusOpts] = useState<string[]>([])
+        {/* Modal body */}
+        <div style={{ flex: 1, minHeight: 0, overflow: 'hidden' }}>
+          {loading ? (
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', height: '100%', gap: 12, color: T.textMuted, fontSize: 14 }}>
+              <div style={{ width: 20, height: 20, border: `2px solid ${T.border}`, borderTopColor: T.blue, borderRadius: '50%', animation: 'spin 0.8s linear infinite' }} />
+              กำลังโหลด...
+            </div>
+          ) : view === 'pdf' ? (
+            pdfSrc ? (
+              <iframe src={pdfSrc} style={{ width: '100%', height: '100%', border: 'none' }} title="PDF Preview" />
+            ) : (
+              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', height: '100%', color: T.textMuted, fontSize: 14 }}>ไม่พบไฟล์ PDF</div>
+            )
+          ) : (
+            /* Table view */
+            <div style={{ height: '100%', overflowY: 'auto', overflowX: 'auto', padding: 20 }}>
+              {rows.length === 0 ? (
+                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', height: 200, color: T.textMuted }}>ไม่มีข้อมูล</div>
+              ) : (
+                <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12 }}>
+                  <thead>
+                    <tr>
+                      <th style={th}>Mode</th>
+                      <th style={th}>Assumption</th>
+                      <th style={{ ...th, width: 80 }}>Picture</th>
+                      <th style={th}>Action</th>
+                      <th style={{ ...th, width: 80 }}>Picture</th>
+                      <th style={{ ...th, whiteSpace: 'nowrap' }}>Due Date</th>
+                      <th style={th}>PIC</th>
+                      <th style={{ ...th, width: 64 }}>Progress</th>
+                      <th style={th}>Status</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {rows.map((r, i) => (
+                      <tr key={i} style={{ background: i % 2 === 0 ? T.rowEven : T.rowOdd }}>
+                        <td style={{ ...td, fontWeight: 700, color: r.modeName ? T.blue : T.textMuted, background: r.modeName ? T.blueSoft : undefined }}>{r.modeName || '—'}</td>
+                        <td style={{ ...td, maxWidth: 200, whiteSpace: 'pre-wrap', textAlign: 'left' }}>{r.assumptionDetail || '—'}</td>
+                        <td style={{ ...td, textAlign: 'center' }}>
+                          {r.assumptionPicture
+                            ? <img src={r.assumptionPicture} style={{ width: 60, height: 48, objectFit: 'cover', borderRadius: 6, border: `1px solid ${T.border}` }} />
+                            : <span style={{ color: T.textMuted }}>—</span>}
+                        </td>
+                        <td style={{ ...td, maxWidth: 200, whiteSpace: 'pre-wrap', textAlign: 'left' }}>{r.actionDetail || '—'}</td>
+                        <td style={{ ...td, textAlign: 'center' }}>
+                          {r.actionPicture
+                            ? <img src={r.actionPicture} style={{ width: 60, height: 48, objectFit: 'cover', borderRadius: 6, border: `1px solid ${T.border}` }} />
+                            : <span style={{ color: T.textMuted }}>—</span>}
+                        </td>
+                        <td style={{ ...td, textAlign: 'center', fontSize: 11, color: T.textSub }}>
+                          {r.dueDateStart || r.dueDateEnd
+                            ? <>{r.dueDateStart}<br /><span style={{ color: T.textMuted }}>–</span><br />{r.dueDateEnd}</>
+                            : '—'}
+                        </td>
+                        <td style={{ ...td, textAlign: 'center', fontWeight: 600 }}>{r.pic || '—'}</td>
+                        <td style={{ ...td, textAlign: 'center' }}><PizzaDisplay value={r.progress} /></td>
+                        <td style={{ ...td, textAlign: 'center' }}><StatusBadge value={r.status} /></td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              )}
+            </div>
+          )}
+        </div>
+      </div>
+      <style>{`@keyframes spin { to { transform: rotate(360deg) } }`}</style>
+    </div>
+  )
+}
 
-//   const ns = (arr: string[]) =>
-//     arr.sort((a,b) => a.localeCompare(b, undefined, { numeric:true, sensitivity:'base' }))
+// ─── Delete Confirm Modal ─────────────────────────────────────────────────────
+const DeleteModal = ({ title, onConfirm, onCancel, loading }: { title: string; onConfirm: () => void; onCancel: () => void; loading: boolean }) => (
+  <div style={{ position: 'fixed', inset: 0, zIndex: 10001, background: 'rgba(17,24,39,.5)', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+    <div style={{ background: T.surface, borderRadius: 14, padding: '28px 32px', maxWidth: 380, width: '90%', boxShadow: T.shadowMd, border: `1px solid ${T.border}`, display: 'flex', flexDirection: 'column', gap: 14 }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+        <div style={{ width: 38, height: 38, borderRadius: '50%', background: '#FEE2E2', display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0 }}>
+          <span style={{ fontSize: 18 }}>🗑️</span>
+        </div>
+        <div>
+          <div style={{ fontWeight: 700, fontSize: 14, color: T.text }}>ลบ Report</div>
+          <div style={{ fontSize: 12, color: T.textSub }}>ไม่สามารถกู้คืนได้</div>
+        </div>
+      </div>
+      <p style={{ fontSize: 13, color: '#555', margin: 0, lineHeight: 1.6, background: '#FEF2F2', border: '1px solid #FECACA', borderRadius: 8, padding: '10px 14px' }}>
+        ต้องการลบ <strong>"{title}"</strong> ออกจากระบบ?
+      </p>
+      <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end' }}>
+        <button onClick={onCancel} style={{ padding: '8px 18px', borderRadius: 8, border: `1px solid ${T.border}`, background: T.surface, fontSize: 13, cursor: 'pointer', color: T.textSub }}>ยกเลิก</button>
+        <button onClick={onConfirm} disabled={loading}
+          style={{ padding: '8px 18px', borderRadius: 8, border: 'none', background: loading ? '#f87171' : T.danger, color: '#fff', fontSize: 13, fontWeight: 700, cursor: loading ? 'not-allowed' : 'pointer', transition: 'background .15s' }}>
+          {loading ? 'กำลังลบ…' : 'ลบออก'}
+        </button>
+      </div>
+    </div>
+  </div>
+)
 
-//   useEffect(() => {
-//     setTodayStr(getTodayStr())
-//     const t = setInterval(() => setTodayStr(getTodayStr()), 60000)
-//     return () => clearInterval(t)
-//   }, [])
+// ─── Format date ─────────────────────────────────────────────────────────────
+function fmtDatetime(iso: string): string {
+  try {
+    const d = new Date(iso)
+    return d.toLocaleString('th-TH', { year: 'numeric', month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })
+  } catch { return iso }
+}
 
-//   const fetchData = async () => {
-//     setLoading(true); setError('')
-//     try {
-//       const r = await fetch(`${API}/records/report`)
-//       if (!r.ok) throw new Error(`HTTP ${r.status}`)
-//       const data = await r.json()
-//       setRows(data)
-//       // Extract unique modes and statuses from data
-//       const modes = [...new Set(data.map((d: any) => d.mode).filter(Boolean))] as string[]
-//       const statuses = [...new Set(data.map((d: any) => d.status).filter(Boolean))] as string[]
-//       setModeOpts(ns(modes))
-//       setStatusOpts(ns(statuses))
-//     } catch (e: any) { setError('Cannot load data: ' + e.message) }
-//     finally { setLoading(false) }
-//   }
+// ═══════════════════════════════════════════════════════════════════════════════
+// MAIN PAGE
+// ═══════════════════════════════════════════════════════════════════════════════
+export default function TableReportPage() {
+  const [reports, setReports]       = useState<SubmittedReport[]>([])
+  const [loading, setLoading]       = useState(true)
+  const [previewNo, setPreviewNo]   = useState<number | null>(null)
+  const [deleteTarget, setDeleteTarget] = useState<SubmittedReport | null>(null)
+  const [deleting, setDeleting]     = useState(false)
+  const [toast, setToast]           = useState<{ msg: string; color: string } | null>(null)
+  const [search, setSearch]         = useState('')
 
-//   useEffect(() => { fetchData() }, [])
+  const fetchReports = useCallback(async () => {
+    setLoading(true)
+    try {
+      const res = await fetch(`${API}/submitted-reports`, { headers: authHeaders() })
+      if (res.ok) setReports(await res.json())
+    } catch {}
+    setLoading(false)
+  }, [])
 
-//   const handleDelete = async () => {
-//     if (confirmNo === null) return
-//     setDeleting(true)
-//     try {
-//       const r = await fetch(`${API}/report/${confirmNo}`, { method:'DELETE' })
-//       if (!r.ok) throw new Error(`HTTP ${r.status}`)
-//       await fetchData()
-//     } catch (e: any) {
-//       alert('ลบไม่สำเร็จ: ' + e.message)
-//     } finally {
-//       setDeleting(false)
-//       setConfirmNo(null)
-//     }
-//   }
+  useEffect(() => { fetchReports() }, [fetchReports])
 
-//   const filtered = rows.filter(r => {
-//     const q = search.toLowerCase()
-//     if (q && !Object.values(r).some(v => String(v ?? '').toLowerCase().includes(q))) return false
-//     const f = applied
-//     const dateVal = String(r.date_day ?? '')
-//     if (f.dateFrom && dateVal < f.dateFrom) return false
-//     if (f.dateTo   && dateVal > f.dateTo)   return false
-//     if (f.mode   && String(r.mode ?? '')     !== f.mode)   return false
-//     if (f.status && String(r.status ?? '')   !== f.status) return false
-//     return true
-//   })
+  const showToast = (msg: string, color = T.blue) => {
+    setToast({ msg, color })
+    setTimeout(() => setToast(null), 2400)
+  }
 
-//   const badgeCount = Object.values(applied).filter(Boolean).length
+  const handleDelete = async () => {
+    if (!deleteTarget) return
+    setDeleting(true)
+    try {
+      const res = await fetch(`${API}/submitted-reports/${deleteTarget.no}`, { method: 'DELETE', headers: authHeaders() })
+      if (res.ok || res.status === 204) {
+        setReports(prev => prev.filter(r => r.no !== deleteTarget.no))
+        showToast('ลบสำเร็จ', '#059669')
+      } else {
+        showToast('เกิดข้อผิดพลาด', T.danger)
+      }
+    } catch { showToast('เกิดข้อผิดพลาด', T.danger) }
+    setDeleting(false)
+    setDeleteTarget(null)
+  }
 
-//   return (
-//     <div className="dfp-page" style={{ height:'100vh', display:'flex', flexDirection:'column', overflow:'hidden', background:'#F8FAFC' }}>
+  const previewReport = previewNo !== null ? reports.find(r => r.no === previewNo) : null
 
-//       {confirmNo !== null && (
-//         <ConfirmDialog
-//           rowNo={confirmNo}
-//           onCancel={() => !deleting && setConfirmNo(null)}
-//           onConfirm={handleDelete}
-//           deleting={deleting}
-//         />
-//       )}
+  const filtered = reports.filter(r =>
+    !search || r.title.toLowerCase().includes(search.toLowerCase())
+  )
 
-//       <div className="dfp-header-bar" style={{ background: 'transparent', borderBottom: 'none', paddingBottom: 0 }}>
-//         <div className="dfp-header-left">
-//           <h1 className="dfp-title">Report Table</h1>
-//           <span className="dfp-breadcrumb">Data Table &gt; Report Table</span>
-//         </div>
-//       </div>
+  const th: React.CSSProperties = { padding: '10px 16px', textAlign: 'left', fontSize: 11, fontWeight: 700, color: T.textMuted, background: T.bg, border: 'none', borderBottom: `1px solid ${T.border}`, whiteSpace: 'nowrap', position: 'sticky', top: 0, zIndex: 1 }
+  const td: React.CSSProperties = { padding: '12px 16px', verticalAlign: 'middle', borderBottom: `1px solid ${T.border}`, fontSize: 13 }
 
-//       <div className="dfp-body">
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', height: '100%', background: T.bg, overflow: 'hidden' }}>
 
-//         {/* Info card */}
-//         <div className="dfp-card dfp-info-card" style={{ flex:'none', height:90 }}>
-//           <div className="dfp-info-field">
-//             <label className="dfp-info-label">Search</label>
-//             <div className="dt-search-wrap">
-//               <IconSearch />
-//               <input className="dt-search" type="text" placeholder="Search..."
-//                 value={search} onChange={e => setSearch(e.target.value)} />
-//             </div>
-//           </div>
-//           <div className="dfp-info-field" style={{ justifyContent:'flex-end' }}>
-//             <label className="dfp-info-label" style={{ visibility:'hidden' }}>_</label>
-//             <div style={{ display:'flex', gap:8 }}>
-//               <button className={`dt-filter-btn${badgeCount>0?' active':''}`} onClick={() => setFpOpen(true)}>
-//                 <IconFilter />
-//                 {badgeCount > 0 && <span className="dt-filter-badge">{badgeCount}</span>}
-//               </button>
-//               <button onClick={fetchData} style={{ display:'flex', alignItems:'center', gap:6, padding:'9px 12px', background:'none', color:'#6b7280', border:'1px solid #e5e7eb', borderRadius:8, fontSize:13, cursor:'pointer', fontFamily:"'Sarabun',sans-serif" }}>
-//                 <IconRefresh />
-//               </button>
-//             </div>
-//           </div>
-//           <div className="dfp-info-field dfp-info-date" style={{ marginLeft:'auto' }}>
-//             <label className="dfp-info-label" style={{ marginLeft:'auto' }}>Date (Real time)</label>
-//             <div className="dfp-date-display">{todayStr}</div>
-//           </div>
-//         </div>
+      {/* ─── Toast ─── */}
+      {toast && (
+        <div style={{ position: 'fixed', bottom: 24, right: 24, zIndex: 9990, background: toast.color, color: '#fff', padding: '10px 18px', borderRadius: 10, fontSize: 13, fontWeight: 500, boxShadow: T.shadowMd, display: 'flex', alignItems: 'center', gap: 8, animation: 'slideUp .25s ease' }}>
+          <span style={{ fontSize: 16 }}>✓</span>{toast.msg}
+        </div>
+      )}
 
-//         {/* Table card */}
-//         <div className="dfp-card" style={{ flex:1, minHeight:0, display:'flex', flexDirection:'column', overflow:'hidden' }}>
-//           <div style={{ padding:'10px 16px 8px', borderBottom:'1px solid #f3f4f6', flexShrink:0 }}>
-//             <span style={{ fontSize:12, color:'#9ca3af' }}>{loading ? 'Loading…' : `${filtered.length} rows`}</span>
-//           </div>
-//           <div style={{ flex:1, overflowX:'auto', overflowY:'auto', minHeight:0, scrollbarWidth:'thin', scrollbarColor:'rgba(99,102,241,.2) transparent' }}>
-//             <table style={{ width:'100%', borderCollapse:'collapse', fontSize:12.5, whiteSpace:'nowrap' }}>
-//               <thead>
-//                 <tr>
-//                   {COLS.map(c => (
-//                     <th key={c.key} style={{ padding:'10px 14px', textAlign:'left', fontWeight:600, fontSize:12, color:'#6b7280', background:'#f9fafb', borderBottom:'1px solid #e5e7eb', borderRight:'1px solid #e5e7eb', position:'sticky', top:0, zIndex:2, whiteSpace:'nowrap' }}>
-//                       {c.label}
-//                     </th>
-//                   ))}
-//                   <th style={{ padding:'10px 14px', fontWeight:600, fontSize:12, color:'#6b7280', background:'#f9fafb', borderBottom:'1px solid #e5e7eb', position:'sticky', top:0, zIndex:2, width:70 }}>
-//                     Action
-//                   </th>
-//                 </tr>
-//               </thead>
-//               <tbody>
-//                 {loading ? (
-//                   <tr><td colSpan={COLS.length+1} style={{ textAlign:'center', padding:48, color:'#d1d5db' }}>Loading…</td></tr>
-//                 ) : error ? (
-//                   <tr><td colSpan={COLS.length+1} style={{ textAlign:'center', padding:48, color:'#C0001A' }}>{error}</td></tr>
-//                 ) : filtered.length === 0 ? (
-//                   <tr><td colSpan={COLS.length+1} style={{ textAlign:'center', padding:48, color:'#d1d5db' }}>No records</td></tr>
-//                 ) : filtered.map((row, i) => (
-//                   <tr key={i}
-//                     onMouseEnter={e => (e.currentTarget as HTMLTableRowElement).style.background='#f5f3ff'}
-//                     onMouseLeave={e => (e.currentTarget as HTMLTableRowElement).style.background=''}
-//                   >
-//                     {COLS.map(c => (
-//                       <td key={c.key} style={{ padding:'9px 14px', borderBottom:'1px solid #f0f0f0', borderRight:'1px solid #f0f0f0', color:'#374151' }}
-//                         title={String(row[c.key] ?? '')}>
-//                         {c.key === 'date_day' ? fmtIsoDate(String(row[c.key] ?? ''))
-//                           : String(row[c.key] ?? '—')}
-//                       </td>
-//                     ))}
-//                     <td style={{ padding:'9px 14px', borderBottom:'1px solid #f0f0f0' }}>
-//                       <button onClick={() => setConfirmNo(row.no)} className="dt-del-btn">ลบ</button>
-//                     </td>
-//                   </tr>
-//                 ))}
-//               </tbody>
-//             </table>
-//           </div>
-//         </div>
+      {/* ─── Modals ─── */}
+      {previewReport && previewNo !== null && (
+        <PdfModal no={previewNo} title={previewReport.title} onClose={() => setPreviewNo(null)} />
+      )}
+      {deleteTarget && (
+        <DeleteModal title={deleteTarget.title} onConfirm={handleDelete} onCancel={() => setDeleteTarget(null)} loading={deleting} />
+      )}
 
-//         <FilterPanel
-//           open={fpOpen} onClose={() => setFpOpen(false)}
-//           filters={filters} setFilters={setFilters}
-//           modeOpts={modeOpts} statusOpts={statusOpts}
-//           onApply={() => setApplied({ ...filters })}
-//           onReset={() => { setFilters(emptyFilters()); setApplied(emptyFilters()) }}
-//         />
+      {/* ─── Header ─── */}
+      <div style={{ height: 64, flexShrink: 0, display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '0 28px', background: T.surface, borderBottom: `1px solid ${T.border}`, boxShadow: '0 1px 3px rgba(20,98,255,.06)' }}>
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
+          <h1 style={{ fontSize: 20, fontWeight: 700, color: T.text, margin: 0, lineHeight: 1.2 }}>Submitted Reports</h1>
+          <span style={{ fontSize: 11, color: T.textMuted }}>Table › Report</span>
+        </div>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+          {/* Search */}
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8, height: 36, padding: '0 12px', border: `1px solid ${T.border}`, borderRadius: 8, background: T.surface, transition: 'border-color .15s' }}
+            onFocus={() => {}} >
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke={T.textMuted} strokeWidth="2"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/></svg>
+            <input value={search} onChange={e => setSearch(e.target.value)} placeholder="ค้นหาชื่อ report…"
+              style={{ border: 'none', outline: 'none', fontSize: 13, fontFamily: 'Sarabun,sans-serif', background: 'transparent', color: T.text, width: 200 }} />
+          </div>
+          {/* Refresh */}
+          <button onClick={fetchReports}
+            style={{ display: 'flex', alignItems: 'center', gap: 6, padding: '8px 14px', borderRadius: 8, border: `1px solid ${T.border}`, background: T.surface, color: T.textSub, fontSize: 13, fontWeight: 600, cursor: 'pointer', fontFamily: 'Sarabun,sans-serif', transition: 'all .15s' }}
+            onMouseEnter={e => { e.currentTarget.style.borderColor = T.blue; e.currentTarget.style.color = T.blue }}
+            onMouseLeave={e => { e.currentTarget.style.borderColor = T.border; e.currentTarget.style.color = T.textSub }}>
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg>
+            Refresh
+          </button>
+        </div>
+      </div>
 
-//       </div>
-//     </div>
-//   )
-// }
+      {/* ─── Stats row ─── */}
+      <div style={{ flexShrink: 0, padding: '16px 28px', display: 'flex', gap: 12 }}>
+        {[
+          { label: 'Report ทั้งหมด', value: reports.length, color: T.blue },
+          { label: 'มี PDF', value: reports.filter(r => r.has_pdf).length, color: '#059669' },
+        ].map(s => (
+          <div key={s.label} style={{ background: T.surface, border: `1px solid ${T.border}`, borderRadius: 10, padding: '12px 20px', display: 'flex', flexDirection: 'column', gap: 2, minWidth: 120, boxShadow: T.shadow }}>
+            <span style={{ fontSize: 11, fontWeight: 600, color: T.textMuted, textTransform: 'uppercase', letterSpacing: '.04em' }}>{s.label}</span>
+            <span style={{ fontSize: 26, fontWeight: 800, color: s.color, lineHeight: 1 }}>{loading ? '…' : s.value}</span>
+          </div>
+        ))}
+      </div>
+
+      {/* ─── Table ─── */}
+      <div style={{ flex: 1, minHeight: 0, padding: '0 28px 24px', display: 'flex', flexDirection: 'column' }}>
+        <div style={{ flex: 1, minHeight: 0, background: T.surface, borderRadius: 12, border: `1px solid ${T.border}`, boxShadow: T.shadow, overflow: 'hidden', display: 'flex', flexDirection: 'column' }}>
+
+          {loading ? (
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', flex: 1, gap: 12, color: T.textMuted, fontSize: 14 }}>
+              <div style={{ width: 20, height: 20, border: `2px solid ${T.border}`, borderTopColor: T.blue, borderRadius: '50%', animation: 'spin 0.8s linear infinite' }} />
+              กำลังโหลด…
+            </div>
+          ) : filtered.length === 0 ? (
+            <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', flex: 1, gap: 12, color: T.textMuted }}>
+              <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" opacity={0.3}><path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/><polyline points="10 9 9 9 8 9"/></svg>
+              <span style={{ fontSize: 14 }}>{search ? 'ไม่พบ report ที่ค้นหา' : 'ยังไม่มี submitted reports'}</span>
+              {!search && <span style={{ fontSize: 12 }}>กด Submit ที่หน้า Report Maker เพื่อบันทึก</span>}
+            </div>
+          ) : (
+            <div style={{ flex: 1, overflowY: 'auto', overflowX: 'hidden' }}>
+              <table style={{ width: '100%', borderCollapse: 'collapse' }}>
+                <thead>
+                  <tr>
+                    <th style={{ ...th, width: 48, textAlign: 'center' }}>#</th>
+                    <th style={th}>ชื่อ Report</th>
+                    <th style={{ ...th, width: 180 }}>วันที่ Submit</th>
+                    <th style={{ ...th, width: 80, textAlign: 'center' }}>PDF</th>
+                    <th style={{ ...th, width: 120, textAlign: 'center' }}>Actions</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {filtered.map((rep, i) => (
+                    <tr key={rep.no}
+                      style={{ background: i % 2 === 0 ? T.rowEven : T.rowOdd, transition: 'background .1s' }}
+                      onMouseEnter={e => (e.currentTarget.style.background = T.blueSoft)}
+                      onMouseLeave={e => (e.currentTarget.style.background = i % 2 === 0 ? T.rowEven : T.rowOdd)}>
+                      <td style={{ ...td, textAlign: 'center', color: T.textMuted, fontWeight: 600 }}>{i + 1}</td>
+                      <td style={td}>
+                        <div style={{ fontWeight: 600, color: T.text, marginBottom: 2 }}>{rep.title}</div>
+                      </td>
+                      <td style={{ ...td, color: T.textSub, fontSize: 12 }}>{fmtDatetime(rep.submitted_at)}</td>
+                      <td style={{ ...td, textAlign: 'center' }}>
+                        {rep.has_pdf ? (
+                          <span style={{ display: 'inline-flex', alignItems: 'center', gap: 4, padding: '3px 8px', borderRadius: 6, background: '#ECFDF5', color: '#059669', fontSize: 11, fontWeight: 700, border: '1px solid #A7F3D0' }}>
+                            ✓ พร้อม
+                          </span>
+                        ) : (
+                          <span style={{ fontSize: 11, color: T.textMuted }}>—</span>
+                        )}
+                      </td>
+                      <td style={{ ...td, textAlign: 'center' }}>
+                        <div style={{ display: 'flex', gap: 6, justifyContent: 'center' }}>
+                          {/* View button */}
+                          <button onClick={() => setPreviewNo(rep.no)}
+                            style={{ display: 'inline-flex', alignItems: 'center', gap: 5, padding: '6px 14px', borderRadius: 7, border: `1px solid #D1E0FF`, background: T.blueSoft, color: T.blue, fontSize: 12, fontWeight: 600, cursor: 'pointer', fontFamily: 'Sarabun,sans-serif', transition: 'all .12s' }}
+                            onMouseEnter={e => { e.currentTarget.style.background = T.blue; e.currentTarget.style.color = '#fff' }}
+                            onMouseLeave={e => { e.currentTarget.style.background = T.blueSoft; e.currentTarget.style.color = T.blue }}>
+                            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>
+                            ดู
+                          </button>
+                          {/* Delete button */}
+                          <button onClick={() => setDeleteTarget(rep)}
+                            style={{ display: 'inline-flex', alignItems: 'center', gap: 5, padding: '6px 12px', borderRadius: 7, border: `1px solid rgba(192,0,26,.25)`, background: 'rgba(192,0,26,.06)', color: T.danger, fontSize: 12, fontWeight: 600, cursor: 'pointer', fontFamily: 'Sarabun,sans-serif', transition: 'all .12s' }}
+                            onMouseEnter={e => { e.currentTarget.style.background = T.danger; e.currentTarget.style.color = '#fff' }}
+                            onMouseLeave={e => { e.currentTarget.style.background = 'rgba(192,0,26,.06)'; e.currentTarget.style.color = T.danger }}>
+                            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 01-2 2H7a2 2 0 01-2-2V6m3 0V4a1 1 0 011-1h4a1 1 0 011 1v2"/></svg>
+                            ลบ
+                          </button>
+                        </div>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </div>
+      </div>
+
+      <style>{`
+        @keyframes spin { to { transform: rotate(360deg) } }
+        @keyframes slideUp { from { opacity:0; transform:translateY(8px) } to { opacity:1; transform:translateY(0) } }
+      `}</style>
+    </div>
+  )
+}

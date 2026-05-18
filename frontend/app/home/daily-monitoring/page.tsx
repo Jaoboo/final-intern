@@ -55,8 +55,16 @@ function getRange(anchor: string, backDays: number): { from: string; to: string 
 
 function buildParetoFromTrend(trend: DailyTrend[], selDate: string) {
   const day = trend.find(d => d.date === selDate)
-  if (!day) return []
-  return Object.entries(day.by_mode)
+  // ถ้าวันที่เลือกไม่มีข้อมูล ให้ใช้ข้อมูลรวมทั้ง range แทน
+  const source = day ? [day] : trend
+  if (source.length === 0) return []
+  const merged: Record<string, number> = {}
+  source.forEach(d => {
+    Object.entries(d.by_mode).forEach(([k, v]) => {
+      merged[k] = (merged[k] || 0) + v
+    })
+  })
+  return Object.entries(merged)
     .map(([defect_mode, defect_count]) => ({ defect_mode, defect_count }))
     .sort((a, b) => b.defect_count - a.defect_count)
 }
@@ -113,6 +121,9 @@ export default function DailyMonitoringPage() {
 
   const [thresholds,    setThresholds]    = useState<Record<ViewType, number>>({ ...DEFAULT_TARGETS })
   const thresholdsRef = useRef<Record<ViewType, number>>({ ...DEFAULT_TARGETS })
+
+  // ── sync thresholdsRef กับ state ทุกครั้งที่ thresholds เปลี่ยน ──
+  useEffect(() => { thresholdsRef.current = thresholds }, [thresholds])
 
   const [defectModes,  setDefectModes]  = useState<DefectModeOption[]>([])
   const [defectMode,   setDefectMode]   = useState('')
@@ -193,7 +204,12 @@ export default function DailyMonitoringPage() {
     const chart = echarts.init(dom)
     chartsRef.current[domId] = chart
 
-    if (!trend.length) { chart.clear(); return }
+    if (!trend.length) {
+      chart.setOption({
+        graphic: [{ type: 'text', left: 'center', top: 'middle', style: { text: 'No data', fill: '#ccc', fontSize: 13 } }]
+      })
+      return
+    }
 
     const dates    = trend.map(d => d.date.slice(5))
     const selShort = selDate.slice(5)
@@ -1031,7 +1047,7 @@ export default function DailyMonitoringPage() {
         </div>
 
         {/* ── Show area ── */}
-        <div className="dm-show">
+        <div className="dm-show" style={{ minHeight: 420 }}>
           <div className="dm-cards-row">
             <DmMetricCard
               label="Defect Ratio" sub="Month"
@@ -1057,8 +1073,8 @@ export default function DailyMonitoringPage() {
             />
           </div>
 
-          <div className="dm-charts-row">
-            <div className="dm-chart-card dm-trend-card" style={{ overflow: 'visible' }}>
+          <div className="dm-charts-row" style={{ minHeight: 280 }}>
+            <div className="dm-chart-card dm-trend-card" style={{ overflow: 'visible', minHeight: 260 }}>
               <div className="dm-chart-header">
                 <span className="dm-chart-title">Defect Trend</span>
                 <div className="dm-chart-header-right">
@@ -1080,7 +1096,7 @@ export default function DailyMonitoringPage() {
               </div>
             </div>
 
-            <div className="dm-chart-card dm-pareto-card">
+            <div className="dm-chart-card dm-pareto-card" style={{ minHeight: 260 }}>
               <div className="dm-chart-header">
                 <span className="dm-chart-title">Pareto <span style={{ fontSize: 11, color: '#9CA3AF', fontWeight: 500 }}>Top 5</span></span>
                 <span className="dm-chart-sub">

@@ -185,7 +185,6 @@ def record_volume():
     finally:
         db.close()
 
-
 def record_defect():
     db = SessionLocal()
     try:

@@ -16,14 +16,14 @@ class EmployeeCreate(BaseModel):
     work_number: str
     full_name:   str
     department:  str
-    position:    str
+    # position:    str
     role:        Role = Role.operator
     password:    str
 
 class EmployeeUpdate(BaseModel):
     full_name:  Optional[str]  = None
     department: Optional[str]  = None
-    position:   Optional[str]  = None
+    # position:   Optional[str]  = None
     role:       Optional[Role] = None
     is_active:  Optional[bool] = None
     password:   Optional[str]  = None
@@ -32,7 +32,7 @@ class EmployeeResponse(BaseModel):
     work_number: str
     full_name:   str
     department:  str
-    position:    str
+    # position:    str
     role:        Role
     is_active:   bool
 
@@ -42,11 +42,10 @@ class EmployeeResponse(BaseModel):
 
 # ── Volume / Defect / Report Form Schemas (เดิม — ห้ามลบ) ────────────────────
 class VolumeFormInsert(BaseModel):
-    v_model:     str
-    v_shift:     str
-    v_line:      str
-    v_quantity:  int
-    v_prod_time: str
+    v_part_no:          str
+    v_core_no:          str
+    v_model_name:       str
+    v_production_month: str
 
 class DefectFormInsert(BaseModel):
     d_name:      str

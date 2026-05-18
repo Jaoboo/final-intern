@@ -961,35 +961,95 @@ def tsd_summary(
         department=department,
     )
 
-@app.get("/records/tsd-defect")
-def api_records_tsd_expense():
-    """ดึงข้อมูล TSD Expense ทั้งหมดจาก DuckDB แคช เพื่อส่งไปแสดงบนหน้าเว็บตาราง"""
-    from .cache import get_read_con
-    cur = get_read_con()
+@app.get("/debug/sqlite-defect-count")
+def debug_sqlite_defect():
+    db = SessionLocal()
+    try:
+        from .database.database import Defect, Volume
+        return {
+            "defect_count": db.query(Defect).count(),
+            "volume_count": db.query(Volume).count(),
+        }
+    finally:
+        db.close()
+
+@app.get("/debug/sync-test")
+def debug_sync_test():
+    from .cache import get_con, _SQLITE_PATH
+    con = get_con()
+    try:
+        con.execute("DETACH DATABASE IF EXISTS sq")
+        con.execute(f"ATTACH '{_SQLITE_PATH}' AS sq (TYPE sqlite, READ_ONLY)")
+        
+        # ทดสอบ JOIN ว่าได้กี่ rows
+        r1 = con.execute("""
+            SELECT COUNT(*) FROM sq.defect d
+            LEFT JOIN sq.employee e ON d.name = e.name
+            LEFT JOIN sq.model m ON d.part_no = m.part_no
+            LEFT JOIN sq.defect_mode dm ON d.defect_qr = dm.defect_item
+        """).fetchone()[0]
+        
+        # ดู sample defect
+        r2 = con.execute("""
+            SELECT d.name, d.part_no, d.defect_qr, d.model_qr
+            FROM sq.defect d LIMIT 3
+        """).fetchall()
+        
+        # ดูว่า employee name ตรงกันไหม
+        r3 = con.execute("""
+            SELECT d.name as defect_name, e.name as emp_name
+            FROM sq.defect d
+            LEFT JOIN sq.employee e ON d.name = e.name
+            LIMIT 5
+        """).fetchall()
+
+        con.execute("DETACH DATABASE IF EXISTS sq")
+        return {
+            "join_count": r1,
+            "defect_sample": r2,
+            "name_match": r3,
+        }
+    except Exception as e:
+        return {"error": str(e)}
     
-    rows = cur.execute("""
-        SELECT *
-        FROM tsd_expense
-        ORDER BY date_day DESC
-    """).fetchall()
+@app.get("/debug/sync-defect-direct")
+def debug_sync_defect_direct():
+    from .cache import get_con, _SQLITE_PATH, _attach_sqlite, _detach_sqlite
+    con = get_con()
+    try:
+        _attach_sqlite(con)
+        
+        # ทดสอบ printf ก่อนว่า DuckDB version นี้รองรับไหม
+        test = con.execute("""
+            SELECT printf('%02d:%02d:%02d', 20, 14, 17)
+        """).fetchone()
+        
+        # ทดสอบ CAST TIME จาก string ตรงๆ
+        test2 = con.execute("""
+            SELECT CAST('20:14:17' AS TIME)
+        """).fetchone()
+        
+        # ทดสอบ scan_time raw value จาก SQLite
+        test3 = con.execute("""
+            SELECT CAST(d.scan_time AS VARCHAR), typeof(d.scan_time)
+            FROM sq.defect d LIMIT 3
+        """).fetchall()
+        
+        _detach_sqlite(con)
+        return {
+            "printf_test": str(test),
+            "cast_time_test": str(test2),
+            "scan_time_raw": test3,
+        }
+    except Exception as e:
+        _detach_sqlite(con)
+        return {"error": str(e)}
     
-    cols = [d[0] for d in cur.description]
-    result = []
-    
-    for i, row in enumerate(rows, 1):
-        r = dict(zip(cols, row))
-        result.append({
-            "no":          i,
-            "db_id":       r.get("no") or i,  # ผูก ID จริงสำหรับการสั่งลบข้อมูล
-            "date_day":    str(r.get("date_day") or ""),
-            "shift_group": f"{r.get('shift') or ''}/{r.get('group_') or ''}".strip("/") or "—",
-            "name":        r.get("name") or "",
-            "department":  r.get("department") or "",
-            "scrap_code":  r.get("scrap_code") or "",
-            "item":        r.get("item") or "",
-            "price":       r.get("price") or 0.0,
-            "quantity":    r.get("quantity") or 0.0,
-            "unit":        r.get("unit") or "",
-            "total":       round((r.get("price") or 0.0) * (r.get("quantity") or 0.0), 2) # คำนวณราคารวม
-        })
-    return result
+@app.get("/debug/tsd-count")
+def debug_tsd_count():
+    db = SessionLocal()
+    try:
+        from .database.database import TSDExpense
+        return {"tsd_count": db.query(TSDExpense).count()}
+    finally:
+        db.close()
